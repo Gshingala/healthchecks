@@ -31,6 +31,7 @@
     <td></td><td></td><td></td>
     <td colspan="2">
         Status: <strong>{{ event.old_status }} ➔ {{ event.new_status }}</strong>.
+        {% if event.withheld %}<span class="withheld"><span class="ic-maintenance" aria-hidden="true"></span> Alert not sent: maintenance window{% if event.withheld_window_name is not None %} "{{ event.withheld_window_name }}"{% endif %}</span>{% endif %}
     </td>
 </tr>
 {% endif %}

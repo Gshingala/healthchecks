@@ -5,7 +5,8 @@ from datetime import timedelta as td
 from unittest.mock import Mock, patch
 
 import time_machine
-from django.test.utils import override_settings
+from django.db import connection
+from django.test.utils import CaptureQueriesContext, override_settings
 from django.utils.timezone import now
 
 from hc.api.models import Channel, Check, Flip, Notification, Ping
@@ -23,6 +24,15 @@ class CheckModelTestCase(BaseTestCase):
 
         check.tags = " "
         self.assertEqual(check.tags_list(), [])
+
+    def test_to_dict_omits_maintenance_by_default(self) -> None:
+        check = Check.objects.create(project=self.project)
+        self.assertNotIn("maintenance", check.to_dict())
+
+    def test_to_dict_includes_maintenance(self) -> None:
+        check = Check.objects.create(project=self.project)
+        self.assertIs(check.to_dict(maintenance=True)["maintenance"], True)
+        self.assertIs(check.to_dict(maintenance=False)["maintenance"], False)
 
     def test_get_status_handles_new_check(self) -> None:
         check = Check()
@@ -411,6 +421,30 @@ class CheckModelTestCase(BaseTestCase):
         check.prune()
 
         self.assertEqual(Flip.objects.count(), 1)
+
+    @override_settings(S3_BUCKET=None)
+    @time_machine.travel(CURRENT_TIME)
+    def test_prune_deletes_flips_in_one_query(self) -> None:
+        check = Check.objects.create(project=self.project, n_pings=101)
+        Ping.objects.create(owner=check, created=CURRENT_TIME, n=101)
+        for i in range(3):
+            Flip.objects.create(
+                owner=check,
+                created=CURRENT_TIME - td(days=94 + i),
+                old_status="new",
+                new_status="down",
+            )
+
+        with CaptureQueriesContext(connection) as ctx:
+            check.prune()
+
+        # Flip must have no reverse relations: deleting flips must not
+        # require Django to SELECT them first to cascade.
+        sqls = [q["sql"] for q in ctx.captured_queries]
+        flip_queries = [sql for sql in sqls if "api_flip" in sql]
+        self.assertEqual(len(flip_queries), 1)
+        self.assertTrue(flip_queries[0].startswith("DELETE"))
+        self.assertEqual(Flip.objects.count(), 0)
 
     @override_settings(S3_BUCKET="test-bucket")
     @patch("hc.api.models.remove_objects")

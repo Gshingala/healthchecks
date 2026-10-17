@@ -30,6 +30,14 @@ each check's details pages:
   <source src="IMG_URL/details_integrations.webm" type="video/webm">
 </video>
 
+## Maintenance Windows
+
+To withhold alerts during planned work, such as a database upgrade, schedule a
+[maintenance window](../maintenance_windows/). During a maintenance window the
+covered checks keep working as usual, but SITE_NAME does not send alerts for them.
+After the window ends, SITE_NAME sends one alert for each covered check that is
+still down.
+
 ## SMS, WhatsApp, and Phone Call Monthly Quotas
 
 SITE_NAME sets a quota on the maximum number of SMS, WhatsApp, and phone-call

@@ -69,6 +69,17 @@ api_urls = [
     path("metrics/", views.metrics),
     path("status/", views.status),
     path("bounces/", views.bounces),
+    path("maintenance/", views.maintenance, name="hc-api-maintenance"),
+    path(
+        "maintenance/<uuid:code>",
+        views.maintenance_single,
+        name="hc-api-maintenance-single",
+    ),
+    path(
+        "maintenance/<uuid:code>/end",
+        views.end_maintenance_window,
+        name="hc-api-maintenance-end",
+    ),
 ]
 
 urlpatterns = [

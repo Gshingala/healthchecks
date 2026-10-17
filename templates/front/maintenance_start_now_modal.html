@@ -1,0 +1,80 @@
+{% firstof p "mw-now" as p %}
+<div id="start-now-modal" class="modal maintenance-modal">
+    <div class="modal-dialog">
+        <form
+            method="post"
+            action="{% url 'hc-add-maintenance' project.code %}"
+            class="form-horizontal scope-{{ form.scope.value|default:'all' }}"
+            data-preview-url="{% url 'hc-maintenance-preview' project.code %}">
+            {% csrf_token %}
+            <div class="modal-content">
+                <div class="modal-header">
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close">&times;</button>
+                    <h4>Start Maintenance Now</h4>
+                </div>
+                <div class="modal-body">
+                    {% if form.non_field_errors %}
+                    <div class="alert alert-danger">{{ form.non_field_errors|join:" " }}</div>
+                    {% endif %}
+
+                    <div class="form-group {% if form.name.errors %}has-error{% endif %}">
+                        <label for="{{ p }}-name" class="col-sm-3 control-label">Name</label>
+                        <div class="col-sm-9">
+                            <input
+                                id="{{ p }}-name"
+                                name="name"
+                                type="text"
+                                maxlength="100"
+                                required
+                                class="form-control"
+                                value="{{ form.name.value|default:'' }}"
+                                aria-describedby="{{ p }}-name-help"
+                                {% if form.name.errors %}aria-invalid="true"{% endif %}>
+                            {% if form.name.errors %}
+                            <div id="{{ p }}-name-help" class="help-block">{{ form.name.errors|join:" " }}</div>
+                            {% else %}
+                            <span id="{{ p }}-name-help" class="help-block">Shown on this page and in the event log.</span>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    {% with minutes=form.duration_minutes.value|default:"60"|stringformat:"s" %}
+                    <div class="form-group {% if form.duration_minutes.errors %}has-error{% endif %}">
+                        <label for="mw-now-duration" class="col-sm-3 control-label">Length</label>
+                        <div class="col-sm-9">
+                            <input
+                                id="mw-now-duration"
+                                name="duration_minutes"
+                                type="number"
+                                min="1"
+                                max="43200"
+                                required
+                                class="form-control mw-duration"
+                                value="{{ minutes }}"
+                                aria-describedby="mw-now-duration-help"
+                                {% if form.duration_minutes.errors %}aria-invalid="true"{% endif %}> minutes
+                            <div class="btn-group mw-presets" role="group" aria-label="Preset lengths">
+                                <button type="button" class="btn btn-default btn-sm {% if minutes == '30' %}active{% endif %}" data-minutes="30" aria-pressed="{% if minutes == '30' %}true{% else %}false{% endif %}">30 min</button>
+                                <button type="button" class="btn btn-default btn-sm {% if minutes == '60' %}active{% endif %}" data-minutes="60" aria-pressed="{% if minutes == '60' %}true{% else %}false{% endif %}">1 hour</button>
+                                <button type="button" class="btn btn-default btn-sm {% if minutes == '120' %}active{% endif %}" data-minutes="120" aria-pressed="{% if minutes == '120' %}true{% else %}false{% endif %}">2 hours</button>
+                                <button type="button" class="btn btn-default btn-sm {% if minutes == '240' %}active{% endif %}" data-minutes="240" aria-pressed="{% if minutes == '240' %}true{% else %}false{% endif %}">4 hours</button>
+                            </div>
+                            {% if form.duration_minutes.errors %}
+                            <div id="mw-now-duration-help" class="help-block">{{ form.duration_minutes.errors|join:" " }}</div>
+                            {% else %}
+                            <span id="mw-now-duration-help" class="help-block">Starts now. 1 to 43200 minutes (30 days).</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% endwith %}
+
+                    {% include "front/maintenance_scope_fields.html" %}
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary" data-pending-text="Starting&hellip;">Start</button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>

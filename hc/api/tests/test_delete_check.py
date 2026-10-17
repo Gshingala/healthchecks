@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import timedelta as td
+
 from django.utils.timezone import now
 
-from hc.api.models import Check
+from hc.api.models import Check, MaintenanceWindow
 from hc.test import BaseTestCase
 
 
@@ -52,3 +54,26 @@ class DeleteCheckTestCase(BaseTestCase):
         doc = r.json()
         self.assertEqual(doc["status"], "new")
         self.assertTrue(doc["started"])
+
+    def add_window(self, start_offset: td = td(minutes=-5)) -> None:
+        start = now() + start_offset
+        MaintenanceWindow.objects.create(
+            project=self.project,
+            name="Deploy",
+            start=start,
+            end=start + td(hours=1),
+            created_via="api",
+        )
+
+    def test_it_reports_maintenance(self) -> None:
+        self.add_window()
+        for v in (1, 2, 3):
+            check = Check.objects.create(project=self.project)
+            url = f"/api/v{v}/checks/{check.code}"
+            r = self.client.delete(url, HTTP_X_API_KEY="X" * 32)
+            self.assertEqual(r.status_code, 200)
+            self.assertTrue(r.json()["maintenance"])
+
+    def test_it_reports_no_maintenance(self) -> None:
+        r = self.client.delete(self.url, HTTP_X_API_KEY="X" * 32)
+        self.assertFalse(r.json()["maintenance"])

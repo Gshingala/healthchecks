@@ -4,7 +4,7 @@ from datetime import timedelta as td
 
 from django.utils.timezone import now
 
-from hc.api.models import Check, Flip
+from hc.api.models import Check, Flip, MaintenanceWindow
 from hc.test import BaseTestCase
 
 
@@ -125,3 +125,32 @@ class PauseTestCase(BaseTestCase):
 
         # It should not create a Flip object, as the check was already paused
         self.assertFalse(Flip.objects.exists())
+
+    def add_window(self, start_offset: td = td(minutes=-5)) -> None:
+        start = now() + start_offset
+        MaintenanceWindow.objects.create(
+            project=self.project,
+            name="Deploy",
+            start=start,
+            end=start + td(hours=1),
+            created_via="api",
+        )
+
+    def test_it_reports_maintenance(self) -> None:
+        self.add_window()
+        r = self.csrf_client.post(
+            self.url, "", content_type="application/json", HTTP_X_API_KEY="X" * 32
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["maintenance"])
+
+    def test_it_reports_maintenance_for_already_paused_check(self) -> None:
+        self.check.status = "paused"
+        self.check.save()
+        self.add_window()
+
+        r = self.csrf_client.post(
+            self.url, "", content_type="application/json", HTTP_X_API_KEY="X" * 32
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["maintenance"])

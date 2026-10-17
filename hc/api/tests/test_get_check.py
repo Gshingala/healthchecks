@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime
 from datetime import timedelta as td
 from uuid import UUID
 
 from django.test.utils import override_settings
 from django.utils.timezone import now
 
-from hc.api.models import Channel, Check
+from hc.api.models import Channel, Check, MaintenanceWindow
 from hc.test import BaseTestCase, TestHttpResponse
 
 
@@ -47,7 +48,7 @@ class GetCheckTestCase(BaseTestCase):
         self.assertEqual(r["Access-Control-Allow-Origin"], "*")
 
         doc = r.json()
-        self.assertEqual(len(doc), 29)
+        self.assertEqual(len(doc), 30)
 
         self.assertEqual(doc["uuid"], str(self.a1.code))
         self.assertEqual(doc["slug"], "alice-1-custom-slug")
@@ -78,6 +79,46 @@ class GetCheckTestCase(BaseTestCase):
             doc["update_url"], f"http://testserver/api/v1/checks/{self.a1.code}"
         )
 
+    def test_it_uses_baseline_query_count(self) -> None:
+        # Baseline was 3 (API key, check, channels), plus 1 for maintenance coverage
+        with self.assertNumQueries(4):
+            r = self.get(self.a1.code, v=3)
+        self.assertEqual(r.status_code, 200)
+
+    def add_window(self, start: datetime) -> None:
+        MaintenanceWindow.objects.create(
+            project=self.project,
+            name="Deploy",
+            start=start,
+            end=start + td(hours=1),
+            created_via="api",
+        )
+
+    def test_it_reports_maintenance(self) -> None:
+        self.add_window(now() - td(minutes=5))
+        for v in (1, 2, 3):
+            r = self.get(self.a1.code, v=v)
+            self.assertTrue(r.json()["maintenance"])
+
+    def test_it_reports_no_maintenance(self) -> None:
+        r = self.get(self.a1.code, v=3)
+        self.assertFalse(r.json()["maintenance"])
+
+    def test_it_reports_upcoming_window_as_no_maintenance(self) -> None:
+        self.add_window(now() + td(hours=1))
+        r = self.get(self.a1.code, v=3)
+        self.assertFalse(r.json()["maintenance"])
+
+    def test_it_reports_maintenance_by_unique_key(self) -> None:
+        self.project.api_key_readonly = "R" * 32
+        self.project.save()
+        self.add_window(now() - td(minutes=5))
+
+        for v in (1, 2, 3):
+            r = self.get(self.a1.unique_key, api_key="R" * 32, v=v)
+            self.assertEqual(r.status_code, 200)
+            self.assertTrue(r.json()["maintenance"])
+
     def test_it_handles_invalid_uuid(self) -> None:
         r = self.get("not-an-uuid")
         self.assertEqual(r.status_code, 404)
@@ -93,7 +134,7 @@ class GetCheckTestCase(BaseTestCase):
         self.assertEqual(r["Access-Control-Allow-Origin"], "*")
 
         doc = r.json()
-        self.assertEqual(len(doc), 29)
+        self.assertEqual(len(doc), 30)
 
         self.assertEqual(doc["timeout"], 3600)
         self.assertEqual(doc["grace"], 900)

@@ -78,6 +78,28 @@ class SendAlertsTestCase(BaseTestCase):
         statsd.incr.assert_called_once()
 
     @patch("hc.api.management.commands.sendalerts.notify")
+    def test_it_claims_lower_id_first(self, mock_notify: Mock) -> None:
+        check = Check.objects.create(project=self.project, status="up")
+        down = Flip(owner=check, created=now() - td(minutes=5))
+        down.old_status = "up"
+        down.new_status = "down"
+        down.save()
+
+        up = Flip(owner=check, created=now())
+        up.old_status = "down"
+        up.new_status = "up"
+        up.save()
+
+        mock_notify.return_value = None
+        Command(stdout=Mock()).process_one_flip()
+
+        down.refresh_from_db()
+        self.assertTrue(down.processed)
+        up.refresh_from_db()
+        self.assertIsNone(up.processed)
+        self.assertEqual(mock_notify.call_args.args[0].id, down.id)
+
+    @patch("hc.api.management.commands.sendalerts.notify")
     def test_it_updates_alert_after(self, mock_notify: Mock) -> None:
         check = Check(project=self.project, status="up")
         check.last_ping = now() - td(hours=1)

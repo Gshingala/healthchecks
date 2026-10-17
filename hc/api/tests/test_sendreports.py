@@ -6,10 +6,11 @@ from unittest.mock import Mock, patch
 
 import time_machine
 from django.core import mail
+from django.core.mail import EmailMultiAlternatives
 from django.utils.timezone import now
 
 from hc.api.management.commands.sendreports import Command
-from hc.api.models import Check, Flip
+from hc.api.models import Check, Flip, MaintenanceWindow
 from hc.test import BaseTestCase
 
 CURRENT_TIME = datetime(2020, 1, 13, 2, tzinfo=timezone.utc)
@@ -168,3 +169,52 @@ class SendReportsTestCase(BaseTestCase):
         # next_nag_date should now be unset
         self.profile.refresh_from_db()
         self.assertIsNone(self.profile.next_nag_date)
+
+    def _add_window(self, tags: str = "") -> None:
+        MaintenanceWindow.objects.create(
+            project=self.project,
+            name="Planned work",
+            start=CURRENT_TIME - td(minutes=5),
+            end=CURRENT_TIME + td(hours=1),
+            tags=tags,
+            created_via="api",
+        )
+
+    def test_nag_skips_covered_checks(self) -> None:
+        self.check.name = "Database job"
+        self.check.tags = "db"
+        self.check.save()
+        Check.objects.create(
+            project=self.project, name="Web job", status="down", last_ping=now()
+        )
+        self._add_window(tags="db")
+
+        found = Command(stdout=Mock()).handle_one_nag()
+        self.assertTrue(found)
+
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].subject, "Reminder: 1 check still down")
+        self.assertEmailContains("Web job")
+        self.assertEmailNotContains("Database job")
+
+    def test_nag_noops_if_all_down_checks_covered(self) -> None:
+        self._add_window()
+
+        found = Command().handle_one_nag()
+        self.assertTrue(found)
+
+        self.assertEqual(len(mail.outbox), 0)
+        self.profile.refresh_from_db()
+        self.assertIsNone(self.profile.next_nag_date)
+
+    def test_nag_escapes_check_name(self) -> None:
+        self.check.name = "<script>alert(1)</script>"
+        self.check.save()
+
+        Command(stdout=Mock()).handle_one_nag()
+
+        self.assertEmailContainsHtml("&lt;script&gt;alert(1)&lt;/script&gt;")
+        email = mail.outbox[0]
+        assert isinstance(email, EmailMultiAlternatives)
+        html_content, _ = email.alternatives[0]
+        self.assertNotIn("<script>", str(html_content))

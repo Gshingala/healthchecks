@@ -1,0 +1,123 @@
+/* Maintenance icon: inline SVG used as a mask, so it takes the text colour */
+.ic-maintenance {
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    vertical-align: -0.125em;
+    background-color: currentColor;
+    -webkit-mask: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAxNiAxNic+PHBhdGggZD0nTTEwLjUgMUE0LjUgNC41IDAgMCAwIDYuMiA2LjhMMS4zIDExLjdhMSAxIDAgMCAwIDAgMS40bDEuNiAxLjZhMSAxIDAgMCAwIDEuNCAwbDQuOS00LjlBNC41IDQuNSAwIDAgMCAxNC44IDRsLTIuNiAyLjYtMi40LS40LS40LTIuNEwxMiAxLjJBNC41IDQuNSAwIDAgMCAxMC41IDF6Jy8+PC9zdmc+") no-repeat center / contain;
+    mask: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAxNiAxNic+PHBhdGggZD0nTTEwLjUgMUE0LjUgNC41IDAgMCAwIDYuMiA2LjhMMS4zIDExLjdhMSAxIDAgMCAwIDAgMS40bDEuNiAxLjZhMSAxIDAgMCAwIDEuNCAwbDQuOS00LjlBNC41IDQuNSAwIDAgMCAxNC44IDRsLTIuNiAyLjYtMi40LS40LS40LTIuNEwxMiAxLjJBNC41IDQuNSAwIDAgMCAxMC41IDF6Jy8+PC9zdmc+") no-repeat center / contain;
+}
+
+/* "Maintenance" label on the checks list and the details page */
+.label.label-maintenance {
+    color: var(--state-info-color);
+    background-color: var(--state-info-bg);
+    border: 1px solid var(--state-info-border);
+}
+
+/* "Alert not sent: maintenance window ..." on flip rows in the event log */
+#log tr.flip .withheld {
+    margin-left: 8px;
+    color: var(--state-info-color);
+}
+
+/* Maintenance page */
+.maintenance-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.maintenance-head h1 {
+    flex-grow: 1;
+}
+
+.maintenance-section {
+    margin-top: 36px;
+}
+
+.maintenance-table > tbody > tr > th {
+    border-top: 0;
+}
+
+.maintenance-table > tbody > tr > td {
+    padding-top: 10px;
+    padding-bottom: 10px;
+    vertical-align: middle;
+    border-top: 1px solid var(--border-muted);
+}
+
+.maintenance-table .mw-tz,
+.maintenance-table .mw-created-by {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.maintenance-table .mw-time {
+    white-space: nowrap;
+}
+
+.maintenance-table .mw-ended > td {
+    color: var(--text-muted);
+}
+
+.maintenance-table .actions {
+    text-align: right;
+    white-space: nowrap;
+}
+
+.maintenance-table .actions form {
+    display: inline;
+}
+
+/* Schedule, edit and start-now modals */
+.maintenance-modal .modal-body {
+    padding: 15px 40px;
+}
+
+.maintenance-modal .mw-date {
+    display: inline-block;
+    width: 160px;
+}
+
+.maintenance-modal .mw-time-input {
+    display: inline-block;
+    width: 110px;
+}
+
+.maintenance-modal .mw-duration {
+    display: inline-block;
+    width: 100px;
+}
+
+.maintenance-modal .mw-presets {
+    margin-left: 8px;
+}
+
+.maintenance-modal .scope-all .mw-tags-group {
+    display: none;
+}
+
+.maintenance-preview {
+    min-height: 20px;
+    margin-top: 5px;
+    color: var(--text-muted);
+}
+
+.maintenance-preview.warning {
+    color: var(--text-warning);
+}
+
+.maintenance-preview ul {
+    list-style: none;
+    padding: 0;
+    margin: 4px 0 0 0;
+}
+
+@media (min-width: 992px) {
+    .maintenance-modal .modal-dialog {
+        width: 650px;
+    }
+}

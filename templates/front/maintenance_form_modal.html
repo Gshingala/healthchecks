@@ -1,0 +1,137 @@
+{% load tz %}
+{% url 'hc-add-maintenance' project.code as add_url %}
+{% firstof p "mw-add" as p %}
+<div id="{% if mw %}edit-{{ mw.code }}{% else %}add-maintenance-modal{% endif %}" class="modal maintenance-modal">
+    <div class="modal-dialog">
+        <form
+            method="post"
+            action="{% firstof action add_url %}"
+            class="form-horizontal scope-{{ form.scope.value|default:'all' }}"
+            data-preview-url="{% url 'hc-maintenance-preview' project.code %}">
+            {% csrf_token %}
+            <div class="modal-content">
+                <div class="modal-header">
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close">&times;</button>
+                    <h4>{% if mw %}Edit Maintenance Window{% else %}Schedule Maintenance{% endif %}</h4>
+                </div>
+                <div class="modal-body">
+                    {% if form.non_field_errors %}
+                    <div class="alert alert-danger">{{ form.non_field_errors|join:" " }}</div>
+                    {% endif %}
+
+                    <div class="form-group {% if form.name.errors %}has-error{% endif %}">
+                        <label for="{{ p }}-name" class="col-sm-3 control-label">Name</label>
+                        <div class="col-sm-9">
+                            <input
+                                id="{{ p }}-name"
+                                name="name"
+                                type="text"
+                                maxlength="100"
+                                required
+                                class="form-control"
+                                value="{{ form.name.value|default:'' }}"
+                                aria-describedby="{{ p }}-name-help"
+                                {% if form.name.errors %}aria-invalid="true"{% endif %}>
+                            {% if form.name.errors %}
+                            <div id="{{ p }}-name-help" class="help-block">{{ form.name.errors|join:" " }}</div>
+                            {% else %}
+                            <span id="{{ p }}-name-help" class="help-block">Shown on this page and in the event log.</span>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    {% if started %}
+                    <div class="form-group">
+                        <span id="{{ p }}-start-label" class="col-sm-3 control-label">Start</span>
+                        <div class="col-sm-9">
+                            <p class="form-control-static">{{ mw.start|timezone:tz|date:"M j, Y H:i" }} <span class="mw-tz">{{ tz }}</span></p>
+                            <input type="hidden" name="start_date" value="{{ form.start_date.value|default:'' }}">
+                            <input type="hidden" name="start_time" value="{{ form.start_time.value|default:'' }}">
+                            <span class="help-block">This window has already started. Only its name and end time can be changed.</span>
+                        </div>
+                    </div>
+                    {% else %}
+                    {% with errors=form.start_date.errors|default:form.start_time.errors %}
+                    <div class="form-group {% if errors %}has-error{% endif %}">
+                        <label for="{{ p }}-start-date" class="col-sm-3 control-label">Start</label>
+                        <div class="col-sm-9">
+                            <input
+                                id="{{ p }}-start-date"
+                                name="start_date"
+                                type="date"
+                                class="form-control mw-date"
+                                required
+                                value="{{ form.start_date.value|default:'' }}"
+                                aria-describedby="{{ p }}-start-help"
+                                {% if errors %}aria-invalid="true"{% endif %}>
+                            <input
+                                name="start_time"
+                                type="time"
+                                class="form-control mw-time-input"
+                                required
+                                aria-label="Start time"
+                                value="{{ form.start_time.value|default:'' }}"
+                                aria-describedby="{{ p }}-start-help"
+                                {% if errors %}aria-invalid="true"{% endif %}>
+                            {% if errors %}
+                            <div id="{{ p }}-start-help" class="help-block">{{ errors|join:" " }}</div>
+                            {% else %}
+                            <span id="{{ p }}-start-help" class="help-block">In {{ tz }}. A time in the past starts the window now.</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% endwith %}
+                    {% endif %}
+
+                    {% with errors=form.end_date.errors|default:form.end_time.errors %}
+                    <div class="form-group {% if errors %}has-error{% endif %}">
+                        <label for="{{ p }}-end-date" class="col-sm-3 control-label">End</label>
+                        <div class="col-sm-9">
+                            <input
+                                id="{{ p }}-end-date"
+                                name="end_date"
+                                type="date"
+                                class="form-control mw-date"
+                                required
+                                value="{{ form.end_date.value|default:'' }}"
+                                aria-describedby="{{ p }}-end-help"
+                                {% if errors %}aria-invalid="true"{% endif %}>
+                            <input
+                                name="end_time"
+                                type="time"
+                                class="form-control mw-time-input"
+                                required
+                                aria-label="End time"
+                                value="{{ form.end_time.value|default:'' }}"
+                                aria-describedby="{{ p }}-end-help"
+                                {% if errors %}aria-invalid="true"{% endif %}>
+                            {% if errors %}
+                            <div id="{{ p }}-end-help" class="help-block">{{ errors|join:" " }}</div>
+                            {% else %}
+                            <span id="{{ p }}-end-help" class="help-block">In {{ tz }}. At most 30 days after the start.</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% endwith %}
+
+                    {% if started %}
+                    <div class="form-group">
+                        <span id="{{ p }}-scope-label" class="col-sm-3 control-label">Scope</span>
+                        <div class="col-sm-9">
+                            <p class="form-control-static">{% if mw.tags %}{% for tag in mw.tags.split %}<span class="label label-tag">{{ tag }}</span> {% endfor %}{% else %}All checks{% endif %}</p>
+                            <input type="hidden" name="scope" value="{{ form.scope.value|default:'' }}">
+                            <input type="hidden" name="tags" value="{{ form.tags.value|default:'' }}">
+                        </div>
+                    </div>
+                    {% else %}
+                    {% include "front/maintenance_scope_fields.html" %}
+                    {% endif %}
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary" data-pending-text="Saving&hellip;">{% if mw %}Save{% else %}Schedule{% endif %}</button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>

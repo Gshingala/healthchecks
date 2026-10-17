@@ -5,7 +5,7 @@ from datetime import timedelta as td
 from django.conf import settings
 from django.utils.timezone import now
 
-from hc.api.models import Channel, Check
+from hc.api.models import Channel, Check, MaintenanceWindow
 from hc.test import BaseTestCase, TestHttpResponse
 
 
@@ -75,6 +75,7 @@ class ListChecksTestCase(BaseTestCase):
         self.assertEqual(a1["pause_url"], pause_url)
 
         self.assertEqual(a1["next_ping"], None)
+        self.assertFalse(a1["maintenance"])
 
         a2 = by_name["Alice 2"]
         self.assertEqual(a2["uuid"], str(self.a2.code))
@@ -182,6 +183,71 @@ class ListChecksTestCase(BaseTestCase):
         a1 = r.json()["checks"][0]
         self.assertEqual(a1["status"], "new")
         self.assertTrue(a1["started"])
+
+    def add_window(self, tags: str = "", hours_from_now: int = 0) -> None:
+        start = now() + td(hours=hours_from_now)
+        MaintenanceWindow.objects.create(
+            project=self.project,
+            name="Deploy",
+            start=start - td(minutes=5),
+            end=start + td(hours=1),
+            tags=tags,
+            created_via="api",
+        )
+
+    def test_it_reports_maintenance(self) -> None:
+        self.add_window(tags="a2-tag")
+        for v in (1, 2, 3):
+            r = self.get(v=v)
+            self.assertEqual(r.status_code, 200)
+
+            by_name = {c["name"]: c for c in r.json()["checks"]}
+            self.assertFalse(by_name["Alice 1"]["maintenance"])
+            self.assertTrue(by_name["Alice 2"]["maintenance"])
+
+    def test_it_only_adds_maintenance_key(self) -> None:
+        before = self.get(v=3).json()["checks"]
+        self.add_window()
+        after = self.get(v=3).json()["checks"]
+
+        for check in before:
+            self.assertFalse(check.pop("maintenance"))
+        for check in after:
+            self.assertTrue(check.pop("maintenance"))
+        self.assertEqual(after, before)
+
+    def test_it_reports_upcoming_window_as_no_maintenance(self) -> None:
+        self.add_window(hours_from_now=2)
+        with self.assertNumQueries(3):
+            r = self.get(v=3)
+
+        for check in r.json()["checks"]:
+            self.assertFalse(check["maintenance"])
+
+    def test_it_reports_maintenance_with_readonly_key(self) -> None:
+        self.project.api_key_readonly = "R" * 32
+        self.project.save()
+        self.add_window()
+
+        r = self.client.get("/api/v3/checks/", HTTP_X_API_KEY="R" * 32)
+        for check in r.json()["checks"]:
+            self.assertTrue(check["maintenance"])
+
+    def test_it_uses_one_extra_query_with_one_window(self) -> None:
+        self.add_window()
+        with self.assertNumQueries(4):
+            self.get(v=3)
+
+    def test_it_uses_one_extra_query_with_many_windows_and_checks(self) -> None:
+        Check.objects.bulk_create(
+            Check(project=self.project, name=f"Bulk {i}") for i in range(498)
+        )
+        for i in range(50):
+            self.add_window(tags=f"tag-{i}")
+
+        with self.assertNumQueries(4):
+            r = self.get(v=3)
+        self.assertEqual(len(r.json()["checks"]), 500)
 
     def test_it_works_with_slug_param(self) -> None:
         r = self.client.get("/api/v1/checks/?slug=alice-1", HTTP_X_API_KEY="X" * 32)

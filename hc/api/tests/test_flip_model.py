@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import timedelta as td
 
 from django.utils.timezone import now
@@ -102,3 +103,26 @@ class FlipModelTestCase(BaseTestCase):
         # The check is not saved, and does not have a primary key.
         # down_duration cannot fetch its flips and should return None.
         self.assertIsNone(flip.down_duration)
+
+    def test_is_withheld_unreleased(self) -> None:
+        self.assertFalse(self.flip.is_withheld_unreleased())
+
+        self.flip.withheld = now()
+        self.assertTrue(self.flip.is_withheld_unreleased())
+
+        self.flip.withheld_outcome = "superseded"
+        self.assertTrue(self.flip.is_withheld_unreleased())
+
+        self.flip.withheld_outcome = "released"
+        self.assertFalse(self.flip.is_withheld_unreleased())
+
+    def test_to_dict_ignores_withheld_mark(self) -> None:
+        before = self.flip.to_dict()
+
+        self.flip.withheld = now()
+        self.flip.withheld_window = uuid.uuid4()
+        self.flip.withheld_outcome = "superseded"
+        self.flip.save()
+
+        self.assertEqual(self.flip.to_dict(), before)
+        self.assertEqual(set(before.keys()), {"timestamp", "up"})

@@ -349,6 +349,14 @@ pre {
     outline: 0;
 }
 
+/* ...but keep a visible focus ring for keyboard users */
+.btn:focus-visible,
+.btn.active:focus-visible,
+.btn:active:focus-visible {
+    outline: 2px solid var(--link-color);
+    outline-offset: 2px;
+}
+
 /* no up/down buttons for number fields */
 input[type="number"] {
     -moz-appearance: textfield;

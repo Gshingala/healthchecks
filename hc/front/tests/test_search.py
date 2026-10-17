@@ -10,6 +10,10 @@ class SearchTestCase(BaseTestCase):
             r, "You can actively signal a <span>failure</span>", status_code=200
         )
 
+    def test_it_finds_maintenance(self) -> None:
+        r = self.client.get("/docs/search/?q=maintenance")
+        self.assertContains(r, "/docs/maintenance_windows/", status_code=200)
+
     def test_it_handles_no_results(self) -> None:
         r = self.client.get("/docs/search/?q=asfghjkl")
         self.assertContains(r, "Your search query matched no results", status_code=200)

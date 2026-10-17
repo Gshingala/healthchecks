@@ -1,0 +1,1 @@
+{% load tz %}{% with until=mw.end|timezone:tz|date:"M j, H:i" %}<span class="label label-maintenance" role="img" title="Under maintenance until {{ until }} {{ tz }} ({{ mw.name }})" aria-label="Under maintenance until {{ until }} {{ tz }} ({{ mw.name }})"><span class="ic-maintenance" aria-hidden="true"></span> Maintenance</span>{% endwith %}

@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 - Update the smtpd management command to use the minismtpd library
 - Update the Shell integration to use env variables instead of text substitution
 - Add ability to edit existing Shell integrations
+- Add maintenance windows (scheduled alert suppression for all checks or by tags, dashboard and API); on PostgreSQL, migration 0126 builds an index on api_flip and scans the table once
 
 ### Bug Fixes
 - Fix the email integration to handle SMTP connection errors gracefully (#1346)

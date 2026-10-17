@@ -43,6 +43,7 @@
         {% for tag in check.tags_list %}
             <span class="label label-tag">{{ tag }}</span>
         {% endfor %}
+        {% if check.maintenance_window %}{% include "front/maintenance_label.html" with mw=check.maintenance_window %}{% endif %}
     </div>
 
     <div class="col-sm-5">
@@ -147,6 +148,11 @@
                         {% if check.status == "paused" %}disabled{% endif %}
                         class="btn btn-sm btn-default" value="Pause" />
                 </form>
+                <button
+                    type="button"
+                    class="btn btn-sm btn-default"
+                    data-toggle="modal"
+                    data-target="#start-now-modal">Start Maintenance&hellip;</button>
                 {% endif %}
 
                 {% if check.url %}
@@ -350,6 +356,11 @@
 {% include "front/filtering_rules_modal.html" %}
 {% include "front/copy_modal.html" %}
 
+{% if rw %}
+{% include "front/maintenance_start_now_modal.html" with form=start_now_form %}
+{{ mw_all_tags|json_script:"mw-all-tags" }}
+{% endif %}
+
 {% if rw and project.show_slugs and not project.ping_key %}
 <div id="no-ping-key-modal" class="modal">
     <div class="modal-dialog">
@@ -380,6 +391,7 @@
 <script id="all-timezones" type="data">{{ timezones|join:"," }}</script>
 {% compress js %}
 <script src="{% static 'js/tom-select.popular.min.js' %}"></script>
+<script src="{% static 'js/maintenance.js' %}"></script>
 <script src="{% static 'js/nouislider.min.js' %}"></script>
 <script src="{% static 'js/snippet-copy.js' %}"></script>
 <script src="{% static 'js/dates.js' %}"></script>

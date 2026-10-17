@@ -9,6 +9,7 @@ When a ping does not arrive on time, Healthchecks sends out alerts.
 
 Healthchecks comes with a web dashboard, API, 25+ integrations for
 delivering notifications, monthly email reports, WebAuthn 2FA support,
+maintenance windows for withholding alerts during planned work,
 team management features: projects, team members, read-only access.
 
 The building blocks are:
@@ -119,6 +120,10 @@ To set up Healthchecks development environment:
 
   With the default configuration, Healthchecks stores data in a SQLite file
   `hc.sqlite` in the checkout directory (`~/webapps/healthchecks`).
+
+  `createsuperuser` prompts for an email address and a password. To run it
+  non-interactively, pass them as arguments:
+  `./manage.py createsuperuser --email admin@example.org --password <password>`.
 
 * Run tests:
 
@@ -233,6 +238,23 @@ the `sendalerts` command like so:
 In a production setup, you will want to run this command from a process
 manager like systemd or [supervisor](http://supervisord.org/).
 
+`sendalerts` also implements maintenance windows. While a window covers a
+check, `sendalerts` records the check's status changes without sending
+notifications ("Alert not sent: maintenance window ..." in the check's event log).
+When the last covering window ends and the check is still down, `sendalerts`
+sends one "down" alert within 60 seconds. If `sendalerts` is not running when a
+window ends, it sends that alert the next time it starts. To list withheld alerts
+that have not been sent yet:
+
+```sql
+SELECT * FROM api_flip WHERE withheld IS NOT NULL AND withheld_outcome IS NULL;
+```
+
+Users manage maintenance windows on the project's **Maintenance** page
+(`/projects/<project-code>/maintenance/`) or through the Management API
+(`/api/v3/maintenance/`). See
+[Maintenance Windows](templates/docs/maintenance_windows.md) for details.
+
 Healthchecks also comes with a `sendreports` management command which
 sends out monthly reports, weekly reports, and the daily or hourly reminders.
 
@@ -256,6 +278,11 @@ tables automatically. By default, Healthchecks keeps the 100 most recent
 pings for every check. You can set the limit higher to keep a longer history:
 go to the Administration Panel, look up user's **Profile** and modify its
 "Ping log limit" field.
+
+Healthchecks also deletes ended maintenance windows (`api_maintenancewindow`)
+90 days after their end time. This happens automatically when someone opens
+the project's Maintenance page or calls the maintenance API. No management
+command is needed.
 
 Healthchecks also provides management commands for cleaning up
 `auth_user` (user accounts) and `api_tokenbucket` (rate limiting records) tables,
@@ -561,7 +588,13 @@ Healthchecks instance in production.
   * `manage.py collectstatic` – collects static files in the `static-collected`
      directory.
   * `manage.py migrate` – applies any pending database schema changes
-     and data migrations.
+     and data migrations. Upgrading to the version with maintenance windows
+     applies migrations `api.0124`–`api.0126`. These add the
+     `api_maintenancewindow` table and three nullable columns to `api_flip`
+     (`withheld`, `withheld_window`, `withheld_outcome`), and they leave
+     existing rows unchanged.
+     Migration `api.0126` builds a partial index on `api_flip`. On a large
+     PostgreSQL database, this scans the whole table once, so plan for it.
 * Processes that need to be running constantly.
   * `manage.py runserver` is intended for development only.
      **Do not use it in production**, instead consider using
