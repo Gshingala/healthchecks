@@ -1408,7 +1408,8 @@ def _changes_start_or_scope(
     # The form only carries minutes, so the stored start's seconds are ignored
     if form.cleaned_data["start"] != mw.start.replace(second=0, microsecond=0):
         return True
-    return form.cleaned_data["tags"] != MaintenanceWindow.normalize_tags(mw.tags)
+    tags: str = form.cleaned_data["tags"]
+    return tags != MaintenanceWindow.normalize_tags(mw.tags)
 
 
 @require_POST

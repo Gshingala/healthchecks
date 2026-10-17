@@ -418,7 +418,7 @@ class EndOfWindowTestCase(BaseTestCase):
     def run_pass(self) -> tuple[int, str]:
         cmd = self.new_command()
         num_released = cmd.handle_end_of_window()
-        return num_released, cmd.stdout.getvalue()  # type: ignore[attr-defined]
+        return num_released, cmd.stdout.getvalue()
 
     def outcome(self, flip: Flip) -> str | None:
         flip.refresh_from_db()
