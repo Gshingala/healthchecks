@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from datetime import timedelta as td
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from hc.api.models import Check, Ping
+from hc.api.models import Check, Flip, MaintenanceWindow, Ping
 from hc.front.views import _get_events
 from hc.test import BaseTestCase
 
@@ -69,3 +69,40 @@ class GetEventsTestCase(BaseTestCase):
             for ping in pings:
                 assert isinstance(ping, Ping)
                 self.assertIsNone(ping.duration)
+
+    def add_flip(self, withheld_window: UUID | None = None) -> Flip:
+        return Flip.objects.create(
+            owner=self.check,
+            created=EPOCH + td(minutes=1),
+            old_status="up",
+            new_status="down",
+            withheld=EPOCH + td(minutes=1) if withheld_window else None,
+            withheld_window=withheld_window,
+        )
+
+    def test_it_adds_no_query_without_withheld_flips(self) -> None:
+        self.add_flip()
+        with self.assertNumQueries(2):
+            events = _get_events(self.check, 100, start=self.start, end=self.end)
+        assert isinstance(events[0], Flip)
+        self.assertIsNone(events[0].withheld_window_name)
+
+    def test_it_sets_withheld_window_names_in_one_query(self) -> None:
+        window = MaintenanceWindow.objects.create(
+            project=self.project,
+            name="Postgres upgrade",
+            start=EPOCH,
+            end=EPOCH + td(hours=1),
+            created_via="dashboard",
+        )
+        self.add_flip(window.code)
+        self.add_flip(window.code)
+        self.add_flip(uuid4())
+
+        with self.assertNumQueries(3):
+            events = _get_events(self.check, 100, start=self.start, end=self.end)
+
+        names = [e.withheld_window_name for e in events if isinstance(e, Flip)]
+        self.assertEqual(
+            sorted(names, key=str), [None, "Postgres upgrade", "Postgres upgrade"]
+        )

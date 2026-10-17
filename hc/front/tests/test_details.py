@@ -6,7 +6,7 @@ from datetime import timedelta as td
 import time_machine
 from django.test.utils import override_settings
 
-from hc.api.models import Check, Flip, Ping
+from hc.api.models import Check, Flip, MaintenanceWindow, Ping
 from hc.test import BaseTestCase
 
 
@@ -303,3 +303,114 @@ class DetailsTestCase(BaseTestCase):
         r = self.client.get(self.url)
         self.assertContains(r, "DOWN – Foo – Mychecks", status_code=200)
         self.assertContains(r, "favicon_down.svg")
+
+
+MW_TIME = datetime(2026, 11, 7, 18, 0, tzinfo=timezone.utc)
+XSS = "<script>alert(1)</script>"
+
+
+@time_machine.travel(MW_TIME)
+class DetailsMaintenanceTestCase(BaseTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.profile.tz = "Europe/Riga"
+        self.profile.save()
+
+        self.check = Check.objects.create(
+            project=self.project, name="Database Backup", tags="db prod"
+        )
+        self.url = f"/checks/{self.check.code}/details/"
+
+    def add_window(self, name: str, start: td, end: td, tags: str = "") -> None:
+        MaintenanceWindow.objects.create(
+            project=self.project,
+            name=name,
+            start=MW_TIME + start,
+            end=MW_TIME + end,
+            tags=tags,
+            created_by=self.alice,
+            created_via="dashboard",
+        )
+
+    def get(self, username: str = "alice@example.org") -> str:
+        self.client.login(username=username, password="password")
+        r = self.client.get(self.url)
+        self.assertEqual(r.status_code, 200)
+        return r.content.decode()
+
+    def test_it_shows_maintenance_label(self) -> None:
+        # Ends 2026-11-07T21:30Z, which is 23:30 in Europe/Riga
+        self.add_window("Postgres upgrade", -td(hours=1), td(hours=3, minutes=30))
+        html = self.get()
+        title = "Under maintenance until Nov 7, 23:30 Europe/Riga (Postgres upgrade)"
+        self.assertIn(f'title="{title}"', html)
+        self.assertIn(f'aria-label="{title}"', html)
+
+    def test_it_names_the_window_with_latest_end(self) -> None:
+        self.add_window("Short", -td(hours=1), td(hours=1), tags="db")
+        self.add_window("Long", -td(hours=1), td(hours=3, minutes=30))
+        html = self.get()
+        self.assertIn("23:30 Europe/Riga (Long)", html)
+        self.assertNotIn("(Short)", html)
+
+    def test_it_shows_no_label_for_upcoming_window(self) -> None:
+        self.add_window("Later", td(hours=1), td(hours=2))
+        self.assertNotIn("label-maintenance", self.get())
+
+    def test_it_shows_no_label_for_uncovered_check(self) -> None:
+        self.add_window("Web only", -td(hours=1), td(hours=1), tags="web")
+        self.assertNotIn("label-maintenance", self.get())
+
+    def test_it_escapes_window_name_in_label(self) -> None:
+        self.add_window(XSS, -td(hours=1), td(hours=1))
+        html = self.get()
+        self.assertNotIn(XSS, html)
+        self.assertIn("(&lt;script&gt;alert(1)&lt;/script&gt;)", html)
+
+    def test_it_shows_start_maintenance_prefilled_with_tags(self) -> None:
+        html = self.get()
+        self.assertIn(
+            'data-target="#start-now-modal">Start Maintenance&hellip;</button>', html
+        )
+        self.assertIn('id="start-now-modal"', html)
+        self.assertIn('value="Maintenance: Database Backup"', html)
+        self.assertIn('value="tags" checked', html)
+        self.assertNotIn('value="all" checked', html)
+        self.assertIn('value="db prod"', html)
+        self.assertIn(f'action="/projects/{self.project.code}/maintenance/add/"', html)
+        self.assertIn("js/maintenance.js", html)
+
+    def test_it_prefills_scope_all_for_check_without_tags(self) -> None:
+        self.check.tags = ""
+        self.check.save()
+        html = self.get()
+        self.assertIn('value="all" checked', html)
+        self.assertNotIn('value="tags" checked', html)
+
+    def test_it_prefills_code_for_unnamed_check(self) -> None:
+        self.check.name = ""
+        self.check.save()
+        self.assertIn(f'value="Maintenance: {self.check.code}"', self.get())
+
+    def test_it_truncates_prefilled_name(self) -> None:
+        self.check.name = "x" * 120
+        self.check.save()
+        expected = ("Maintenance: " + "x" * 120)[:100]
+        html = self.get()
+        self.assertIn(f'value="{expected}"', html)
+        self.assertNotIn(f'value="{expected}x', html)
+
+    def test_it_escapes_prefilled_name(self) -> None:
+        self.check.name = XSS
+        self.check.save()
+        html = self.get()
+        self.assertIn(
+            'value="Maintenance: &lt;script&gt;alert(1)&lt;/script&gt;"', html
+        )
+
+    def test_it_hides_start_maintenance_from_readonly_users(self) -> None:
+        self.bobs_membership.role = "r"
+        self.bobs_membership.save()
+        html = self.get("bob@example.org")
+        self.assertNotIn("Start Maintenance", html)
+        self.assertNotIn("start-now-modal", html)

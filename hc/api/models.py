@@ -20,7 +20,7 @@ from django.contrib.humanize.templatetags.humanize import naturaltime
 from django.core.mail import mail_admins
 from django.core.signing import TimestampSigner
 from django.db import IntegrityError, models, transaction
-from django.db.models import F, QuerySet
+from django.db.models import Exists, F, OuterRef, QuerySet
 from django.http import HttpRequest
 from django.urls import reverse
 from django.utils.functional import cached_property
@@ -43,6 +43,13 @@ CHECK_KINDS = (("simple", "Simple"), ("cron", "Cron"), ("oncalendar", "OnCalenda
 # max time between start and ping where we will consider both events related:
 MAX_DURATION = td(hours=72)
 REASONS = (("", "Unknown"), ("timeout", "Timeout"), ("fail", "Fail signal"))
+# max upcoming + active maintenance windows per project:
+MAINTENANCE_LIMIT = 100
+MAINTENANCE_MAX_LENGTH = td(days=30)
+# ended maintenance windows are kept this long, then pruned:
+MAINTENANCE_RETENTION = td(days=90)
+CREATED_VIA = (("dashboard", "Dashboard"), ("api", "API"))
+WITHHELD_OUTCOMES = (("released", "Released"), ("superseded", "Superseded"))
 
 
 TRANSPORTS: dict[str, tuple[str, type[transports.Transport] | str]] = {
@@ -148,6 +155,7 @@ class CheckDict(TypedDict):
     timeout: NotRequired[int]
     schedule: NotRequired[str]
     tz: NotRequired[str]
+    maintenance: NotRequired[bool]
 
 
 @dataclass
@@ -224,6 +232,8 @@ class Check(models.Model):
 
     # Used to pass downtime data to report templates. Not persisted to db.
     past_downtimes: list[DowntimeRecord] | None = None
+    # Used to pass maintenance coverage to views and templates. Not persisted to db.
+    maintenance_window: MaintenanceWindow | None = None
 
     class Meta:
         indexes = (
@@ -436,7 +446,9 @@ class Check(models.Model):
     def filter_any(self) -> bool:
         return self.filter_subject or self.filter_body or self.filter_http_body
 
-    def to_dict(self, *, readonly: bool = False, v: int = 3) -> CheckDict:
+    def to_dict(
+        self, *, readonly: bool = False, v: int = 3, maintenance: bool | None = None
+    ) -> CheckDict:
         with_started = v == 1
         result: CheckDict = {
             "name": self.name,
@@ -487,6 +499,9 @@ class Check(models.Model):
         elif self.kind in ("cron", "oncalendar"):
             result["schedule"] = self.schedule
             result["tz"] = self.tz
+
+        if maintenance is not None:
+            result["maintenance"] = maintenance
 
         return result
 
@@ -1365,6 +1380,16 @@ class Flip(models.Model):
     old_status = models.CharField(max_length=8, choices=STATUSES)
     new_status = models.CharField(max_length=8, choices=STATUSES)
     reason = models.CharField(max_length=8, choices=REASONS, default="")
+    withheld = models.DateTimeField(null=True, blank=True)
+    # Deliberately not a foreign key: a reverse relation to Flip would make
+    # Check.prune() select flips before deleting them.
+    withheld_window = models.UUIDField(null=True, blank=True)
+    withheld_outcome = models.CharField(
+        max_length=10, null=True, blank=True, choices=WITHHELD_OUTCOMES
+    )
+
+    # Set by hc.front.views for event rows. Not persisted to db.
+    withheld_window_name: str | None = None
 
     class Meta:
         indexes = (
@@ -1380,7 +1405,16 @@ class Flip(models.Model):
                 fields=["owner", "created"],
                 name="api_flip_owner_created",
             ),
+            # For quickly looking up withheld flips awaiting an outcome.
+            models.Index(
+                fields=["withheld"],
+                name="api_flip_withheld_pending",
+                condition=models.Q(withheld__isnull=False, withheld_outcome=None),
+            ),
         )
+
+    def is_withheld_unreleased(self) -> bool:
+        return self.withheld is not None and self.withheld_outcome != "released"
 
     def to_dict(self) -> FlipDict:
         return {
@@ -1432,6 +1466,166 @@ class Flip(models.Model):
             return self.created - prev_flip.created
 
         return None
+
+
+class MaintenanceWindowDict(TypedDict):
+    uuid: str
+    name: str
+    start: str
+    end: str
+    scope: str
+    tags: str
+    state: str
+    created: str
+    created_via: str
+
+
+class MaintenanceWindowManager(models.Manager["MaintenanceWindow"]):
+    def _active(self, at: datetime) -> QuerySet[MaintenanceWindow]:
+        return self.filter(start__lte=at, end__gt=at)
+
+    def flag_checks(self, q: QuerySet[Check], at: datetime) -> QuerySet[Check]:
+        """Annotate checks with maintenance_possible.
+
+        maintenance_possible is True when the check's project has a window
+        active at `at`. Tags are not considered, see set_coverage().
+        """
+        windows = self._active(at).filter(project_id=OuterRef("project_id"))
+        return q.annotate(maintenance_possible=Exists(windows))
+
+    def set_coverage(self, checks: Sequence[Check], at: datetime) -> None:
+        """Set check.maintenance_window on every check in `checks`.
+
+        Checks must come from flag_checks(); checks not flagged are skipped.
+        Issues no query if no check is flagged, otherwise exactly one.
+        """
+        candidates = []
+        for check in checks:
+            check.maintenance_window = None
+            if getattr(check, "maintenance_possible", False):
+                candidates.append(check)
+
+        if not candidates:
+            return
+
+        project_ids = {check.project_id for check in candidates}
+        q = self._active(at).filter(project_id__in=project_ids)
+        windows = list(q.order_by("-end", "-id"))
+        for check in candidates:
+            for window in windows:
+                if window.covers(check, at):
+                    check.maintenance_window = window
+                    break
+
+    def covering(self, check: Check, at: datetime) -> MaintenanceWindow | None:
+        """Return the window covering `check` at `at` with the latest end."""
+        q = self._active(at).filter(project_id=check.project_id)
+        for window in q.order_by("-end", "-id"):
+            if window.covers(check, at):
+                return window
+        return None
+
+    def assert_can_add(self, project: Project, at: datetime) -> None:
+        if self.filter(project=project, end__gt=at).count() >= MAINTENANCE_LIMIT:
+            raise MaintenanceWindow.Invalid("limit")
+
+    def prune(self, project: Project, at: datetime) -> None:
+        threshold = at - MAINTENANCE_RETENTION
+        self.filter(project=project, end__lt=threshold).delete()
+
+
+class MaintenanceWindow(models.Model):
+    class Invalid(Exception):
+        def __init__(self, code: str) -> None:
+            # One of: "end_before_start", "end_in_past", "too_long", "limit"
+            self.code = code
+
+    code = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    project = models.ForeignKey(Project, models.CASCADE)
+    name = models.CharField(max_length=100)
+    start = models.DateTimeField()
+    end = models.DateTimeField()
+    tags = models.CharField(max_length=500, blank=True)
+    created = models.DateTimeField(default=now)
+    created_by = models.ForeignKey(User, models.SET_NULL, null=True, blank=True)
+    created_via = models.CharField(max_length=9, choices=CREATED_VIA)
+    end_handled = models.DateTimeField(null=True, blank=True, editable=False)
+
+    objects = MaintenanceWindowManager()
+
+    class Meta:
+        indexes = (
+            # For listing a project's windows and counting upcoming + active ones.
+            models.Index(fields=["project", "end"], name="api_mw_project_end"),
+            # For quickly looking up ended windows not yet handled.
+            models.Index(
+                fields=["end"],
+                name="api_mw_end_not_handled",
+                condition=models.Q(end_handled=None),
+            ),
+        )
+
+    def __str__(self) -> str:
+        return self.name
+
+    def tags_set(self) -> set[str]:
+        return set(self.tags.split())
+
+    @property
+    def scope(self) -> str:
+        return "all" if self.tags == "" else "tags"
+
+    def state(self, at: datetime | None = None) -> str:
+        if at is None:
+            at = now()
+        if at < self.start:
+            return "upcoming"
+        if at < self.end:
+            return "active"
+        return "ended"
+
+    def covers(self, check: Check, at: datetime) -> bool:
+        if check.project_id != self.project_id:
+            return False
+        if not (self.start <= at < self.end):
+            return False
+        return self.tags == "" or check.matches_tag_set(self.tags_set())
+
+    def to_dict(self) -> MaintenanceWindowDict:
+        return {
+            "uuid": str(self.code),
+            "name": self.name,
+            "start": self.start.replace(microsecond=0).isoformat(),
+            "end": self.end.replace(microsecond=0).isoformat(),
+            "scope": self.scope,
+            "tags": self.tags,
+            "state": self.state(),
+            "created": self.created.replace(microsecond=0).isoformat(),
+            "created_via": self.created_via,
+        }
+
+    @staticmethod
+    def normalize_tags(tags: str) -> str:
+        # dict.fromkeys dedupes while keeping the first occurrence's position
+        return " ".join(dict.fromkeys(tags.split()))
+
+    @staticmethod
+    def clean_times(
+        start: datetime, end: datetime, *, at: datetime, move_start: bool = True
+    ) -> tuple[datetime, datetime]:
+        start = start.replace(microsecond=0)
+        end = end.replace(microsecond=0)
+        if move_start and start <= at:
+            start = at.replace(microsecond=0)
+
+        if end <= start:
+            raise MaintenanceWindow.Invalid("end_before_start")
+        if end <= at:
+            raise MaintenanceWindow.Invalid("end_in_past")
+        if end - start > MAINTENANCE_MAX_LENGTH:
+            raise MaintenanceWindow.Invalid("too_long")
+
+        return start, end
 
 
 class TokenBucket(models.Model):

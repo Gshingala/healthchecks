@@ -222,6 +222,13 @@ class Profile(models.Model):
         # Checks in each project will be sorted by check name in the template,
         # after grouping.
         q = q.select_related("project").order_by("project__name", "project_id")
+        if nag:
+            from hc.api.models import MaintenanceWindow
+
+            # Flag checks in projects with an active maintenance window,
+            # set_coverage() below then decides which of them are covered
+            nag_time = now()
+            q = MaintenanceWindow.objects.flag_checks(q, nag_time)
         # list() executes the query, to avoid DB access while rendering the template.
         checks = list(q)
 
@@ -281,6 +288,10 @@ class Profile(models.Model):
         if nag:
             # For nags, only show checks that are currently down
             checks = [c for c in checks if c.get_status() == "down"]
+            if checks:
+                # Leave out checks covered by an active maintenance window
+                MaintenanceWindow.objects.set_coverage(checks, nag_time)
+                checks = [c for c in checks if c.maintenance_window is None]
             if not checks:
                 return False
             ctx["checks"] = checks
@@ -348,7 +359,14 @@ class Profile(models.Model):
         return project.check_set.count() <= self.num_checks_available()
 
     def update_next_nag_date(self) -> None:
-        any_down = self.checks_from_all_projects().filter(status="down").exists()
+        from hc.api.models import MaintenanceWindow
+
+        # Checks covered by an active maintenance window do not count as down
+        now_value = now()
+        q = self.checks_from_all_projects().filter(status="down")
+        down_checks = list(MaintenanceWindow.objects.flag_checks(q, now_value))
+        MaintenanceWindow.objects.set_coverage(down_checks, now_value)
+        any_down = any(c.maintenance_window is None for c in down_checks)
         if any_down and self.next_nag_date is None and self.nag_period:
             self.next_nag_date = now() + self.nag_period
             self.save(update_fields=["next_nag_date"])

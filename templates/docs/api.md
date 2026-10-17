@@ -33,6 +33,12 @@ Endpoint Name                                         | Endpoint Address
 [List existing integrations](#list-channels)          | `GET SITE_ROOT/api/v3/channels/`
 **Badges**                                            |
 [List project's badges](#list-badges)                 | `GET SITE_ROOT/api/v3/badges/`
+**Maintenance windows**                               |
+[List maintenance windows](#list-maintenance)         | `GET SITE_ROOT/api/v3/maintenance/`
+[Create a maintenance window](#create-maintenance)    | `POST SITE_ROOT/api/v3/maintenance/`
+[Get a single maintenance window](#get-maintenance)   | `GET SITE_ROOT/api/v3/maintenance/<uuid>`
+[End a maintenance window](#end-maintenance)          | `POST SITE_ROOT/api/v3/maintenance/<uuid>/end`
+[Delete a maintenance window](#delete-maintenance)    | `DELETE SITE_ROOT/api/v3/maintenance/<uuid>`
 **Service status**                                    |
 [Check database connectivity](#status)                | `GET SITE_ROOT/api/v3/status/`
 
@@ -60,6 +66,8 @@ read-only key
     * [Get a single check](#get-check)
     * [List check's status changes](#list-flips)
     * [List project's badges](#list-badges)
+    * [List maintenance windows](#list-maintenance)
+    * [Get a single maintenance window](#get-maintenance)
 
     Omits sensitive information from the API responses. See the documentation of
     individual API endpoints for details.
@@ -161,7 +169,8 @@ curl --header "X-Api-Key: your-api-key" SITE_ROOT/api/v3/checks/
       "pause_url": "SITE_ROOT/api/v3/checks/31365bce-8da9-4729-8ff3-aaa71d56b712/pause",
       "resume_url": "SITE_ROOT/api/v3/checks/31365bce-8da9-4729-8ff3-aaa71d56b712/resume",
       "channels": "1bdea468-03bf-47b8-ab27-29a9dd0e4b94,51c6eb2b-2ae1-456b-99fe-6f1e0a36cd3c",
-      "timeout": 3600
+      "timeout": 3600,
+      "maintenance": false
     },
     {
       "name": "Database Backup",
@@ -191,7 +200,8 @@ curl --header "X-Api-Key: your-api-key" SITE_ROOT/api/v3/checks/
       "resume_url": "SITE_ROOT/api/v3/checks/803f680d-e89b-492b-82ef-2be7b774a92d/resume",
       "channels": "1bdea468-03bf-47b8-ab27-29a9dd0e4b94,51c6eb2b-2ae1-456b-99fe-6f1e0a36cd3c",
       "schedule": "15 5 * * *",
-      "tz": "UTC"
+      "tz": "UTC",
+      "maintenance": false
     }
   ]
 }
@@ -199,6 +209,9 @@ curl --header "X-Api-Key: your-api-key" SITE_ROOT/api/v3/checks/
 
 The possible values for the `status` field are: `new`, `up`, `grace`, `down`,
 and `paused`.
+
+The `maintenance` field is `true` if an active
+[maintenance window](../maintenance_windows/) currently covers the check.
 
 When using the read-only API key, SITE_NAME omits the following fields from responses:
 `uuid`, `ping_url`, `update_url`, `pause_url`, `resume_url`, `channels`.  It adds an
@@ -233,7 +246,8 @@ Example:
       "filter_default_fail": false,
       "badge_url": "SITE_ROOT/b/2/1b9d0386-d07e-44b0-8995-4a9a372de43c.svg",
       "unique_key": "a6c7b0a8a66bed0df66abfdab3c77736861703ee",
-      "timeout": 3600
+      "timeout": 3600,
+      "maintenance": false
     },
     {
       "name": "Database Backup",
@@ -258,7 +272,8 @@ Example:
       "badge_url": "SITE_ROOT/b/2/7d3ab93d-836e-4505-bbda-fcbd5e07adf9.svg",
       "unique_key": "124f983e0e3dcaeba921cfcef46efd084576e783",
       "schedule": "15 5 * * *",
-      "tz": "UTC"
+      "tz": "UTC",
+      "maintenance": false
     }
   ]
 }
@@ -324,12 +339,16 @@ curl --header "X-Api-Key: your-api-key" SITE_ROOT/api/v3/checks/<uuid>
   "resume_url": "SITE_ROOT/api/v3/checks/803f680d-e89b-492b-82ef-2be7b774a92d/resume",
   "channels": "1bdea468-03bf-47b8-ab27-29a9dd0e4b94,51c6eb2b-2ae1-456b-99fe-6f1e0a36cd3c",
   "schedule": "15 5 * * *",
-  "tz": "UTC"
+  "tz": "UTC",
+  "maintenance": false
 }
 ```
 
 The possible values for the `status` field are: `new`, `up`, `grace`, `down`,
 and `paused`.
+
+The `maintenance` field is `true` if an active
+[maintenance window](../maintenance_windows/) currently covers the check.
 
 ### Example Read-Only Response
 
@@ -364,7 +383,8 @@ easily construct these URLs themselves *if* they know the check's unique UUID.
   "badge_url": "SITE_ROOT/b/2/7d3ab93d-836e-4505-bbda-fcbd5e07adf9.svg",
   "unique_key": "124f983e0e3dcaeba921cfcef46efd084576e783",
   "schedule": "15 5 * * *",
-  "tz": "UTC"
+  "tz": "UTC",
+  "maintenance": false
 }
 ```
 
@@ -703,7 +723,8 @@ curl SITE_ROOT/api/v3/checks/ \
   "pause_url": "SITE_ROOT/api/v3/checks/7918b17b-a745-4db1-8575-9d2e07c97f79/pause",
   "resume_url": "SITE_ROOT/api/v3/checks/7918b17b-a745-4db1-8575-9d2e07c97f79/resume",
   "channels": "",
-  "timeout": 3600
+  "timeout": 3600,
+  "maintenance": false
 }
 ```
 
@@ -1016,7 +1037,8 @@ curl SITE_ROOT/api/v3/checks/7918b17b-a745-4db1-8575-9d2e07c97f79 \
   "pause_url": "SITE_ROOT/api/v3/checks/7918b17b-a745-4db1-8575-9d2e07c97f79/pause",
   "resume_url": "SITE_ROOT/api/v3/checks/7918b17b-a745-4db1-8575-9d2e07c97f79/resume",
   "channels": "",
-  "timeout": 3600
+  "timeout": 3600,
+  "maintenance": false
 }
 ```
 
@@ -1087,7 +1109,8 @@ header is sometimes required by some network proxies and web servers.
   "pause_url": "SITE_ROOT/api/v3/checks/7918b17b-a745-4db1-8575-9d2e07c97f79/pause",
   "resume_url": "SITE_ROOT/api/v3/checks/7918b17b-a745-4db1-8575-9d2e07c97f79/resume",
   "channels": "",
-  "timeout": 3600
+  "timeout": 3600,
+  "maintenance": false
 }
 ```
 
@@ -1161,7 +1184,8 @@ header is sometimes required by some network proxies and web servers.
   "pause_url": "SITE_ROOT/api/v3/checks/7918b17b-a745-4db1-8575-9d2e07c97f79/pause",
   "resume_url": "SITE_ROOT/api/v3/checks/7918b17b-a745-4db1-8575-9d2e07c97f79/resume",
   "channels": "",
-  "timeout": 3600
+  "timeout": 3600,
+  "maintenance": false
 }
 ```
 
@@ -1228,7 +1252,8 @@ curl SITE_ROOT/api/v3/checks/7918b17b-a745-4db1-8575-9d2e07c97f79 \
   "pause_url": "SITE_ROOT/api/v3/checks/7918b17b-a745-4db1-8575-9d2e07c97f79/pause",
   "resume_url": "SITE_ROOT/api/v3/checks/7918b17b-a745-4db1-8575-9d2e07c97f79/resume",
   "channels": "",
-  "timeout": 3600
+  "timeout": 3600,
+  "maintenance": false
 }
 ```
 
@@ -1545,6 +1570,336 @@ curl --header "X-Api-Key: your-api-key" SITE_ROOT/api/v3/badges/
       "shields3": "SITE_ROOT/badge/67541b37-8b9c-4d17-b952-690eae/9X7kcZoe.shields"
     }
   }
+}
+```
+
+## List Maintenance Windows {: #list-maintenance .rule }
+
+`GET SITE_ROOT/api/v3/maintenance/`
+
+Returns a list of [maintenance windows](../maintenance_windows/) belonging to the
+project, most recent start first.
+
+### Query Parameters
+
+state=&lt;active|upcoming|ended&gt;
+:   Filters the maintenance windows by their state. A maintenance window is
+    `upcoming` before its start time, `active` from its start time (inclusive) until
+    its end time (exclusive), and `ended` after its end time.
+
+    Example:
+
+    `SITE_ROOT/api/v3/maintenance/?state=active`
+
+### Response Codes
+
+200 OK
+:   The request succeeded.
+
+400 Bad Request
+:   The `state` parameter has an invalid value.
+
+401 Unauthorized
+:   The API key is either missing or invalid.
+
+### Example Request
+
+```bash
+curl --header "X-Api-Key: your-api-key" SITE_ROOT/api/v3/maintenance/
+```
+
+### Example Response
+
+```json
+{
+  "windows": [
+    {
+      "uuid": "6e2f4c1a-8d5b-4f0e-9a51-2b7c3d4e5f60",
+      "name": "Postgres upgrade",
+      "start": "2026-11-07T20:00:00+00:00",
+      "end": "2026-11-07T21:30:00+00:00",
+      "scope": "tags",
+      "tags": "db prod",
+      "state": "upcoming",
+      "created": "2026-11-01T09:12:44+00:00",
+      "created_via": "dashboard"
+    }
+  ]
+}
+```
+
+The possible values for the `scope` field are: `all` (the window covers all checks
+in the project) and `tags` (the window covers checks having all of the listed tags).
+The possible values for the `created_via` field are: `dashboard` and `api`.
+
+
+## Create a Maintenance Window {: #create-maintenance .rule }
+
+`POST SITE_ROOT/api/v3/maintenance/`
+
+Creates a new maintenance window and returns its JSON representation.
+This API call requires the read-write API key.
+
+### Request Parameters
+
+name
+:   string, required.
+
+    The name of the maintenance window, at most 100 characters long.
+
+    Example:
+
+    <pre>{"name": "Postgres upgrade"}</pre>
+
+start
+:   string, optional, default value: the current time.
+
+    The start time of the maintenance window, in ISO 8601 format with a
+    time zone offset. If the start time is in the past, SITE_NAME uses the
+    current time instead.
+
+    Example:
+
+    <pre>{"start": "2026-11-07T20:00:00+00:00"}</pre>
+
+end
+:   string, optional.
+
+    The end time of the maintenance window, in ISO 8601 format with a
+    time zone offset. It must be in the future, after the start time, and at most
+    30 days after the start time.
+
+    You must specify exactly one of `end` and `duration`.
+
+    Example:
+
+    <pre>{"end": "2026-11-07T21:30:00+00:00"}</pre>
+
+duration
+:   number, optional.
+
+    The length of the maintenance window in seconds, counted from its start time.
+    Must be an integer between 60 (one minute) and 2592000 (30 days).
+
+    You must specify exactly one of `end` and `duration`.
+
+    Example:
+
+    <pre>{"duration": 5400}</pre>
+
+tags
+:   string, optional, default value: "".
+
+    A space-delimited list of tags, at most 500 characters long. The maintenance
+    window covers checks having all of the listed tags. Tag matching is exact and
+    case-sensitive. If the list is empty, the maintenance window covers all checks
+    in the project.
+
+    Example:
+
+    <pre>{"tags": "db prod"}</pre>
+
+### Response Codes
+
+201 Created
+:   The maintenance window was successfully created.
+
+400 Bad Request
+:   The request is not well-formed, violates schema, or uses invalid
+    field values.
+
+401 Unauthorized
+:   The API key is either missing or invalid.
+
+403 Forbidden
+:   The project already has the maximum number of upcoming or active
+    maintenance windows (100). The response body contains the error message
+    "too many upcoming or active maintenance windows (limit 100)".
+
+### Example Request
+
+```bash
+curl SITE_ROOT/api/v3/maintenance/ \
+    --header "X-Api-Key: your-api-key" \
+    --data '{"name": "Postgres upgrade", "start": "2026-11-07T20:00:00+00:00", "duration": 5400, "tags": "db prod"}'
+```
+
+Or, alternatively:
+
+```bash
+curl SITE_ROOT/api/v3/maintenance/ \
+    --data '{"api_key": "your-api-key", "name": "Postgres upgrade", "start": "2026-11-07T20:00:00+00:00", "duration": 5400, "tags": "db prod"}'
+```
+
+### Example Response
+
+```json
+{
+  "uuid": "6e2f4c1a-8d5b-4f0e-9a51-2b7c3d4e5f60",
+  "name": "Postgres upgrade",
+  "start": "2026-11-07T20:00:00+00:00",
+  "end": "2026-11-07T21:30:00+00:00",
+  "scope": "tags",
+  "tags": "db prod",
+  "state": "upcoming",
+  "created": "2026-11-01T09:12:44+00:00",
+  "created_via": "api"
+}
+```
+
+
+## Get a Single Maintenance Window {: #get-maintenance .rule }
+
+`GET SITE_ROOT/api/v3/maintenance/<uuid>`
+
+Returns a JSON representation of a single maintenance window.
+
+This API call has no request parameters.
+
+### Response Codes
+
+200 OK
+:   The request succeeded.
+
+401 Unauthorized
+:   The API key is either missing or invalid.
+
+403 Forbidden
+:   Access denied, wrong API key.
+
+404 Not Found
+:   The specified maintenance window does not exist.
+
+### Example Request
+
+```bash
+curl --header "X-Api-Key: your-api-key" \
+    SITE_ROOT/api/v3/maintenance/6e2f4c1a-8d5b-4f0e-9a51-2b7c3d4e5f60
+```
+
+### Example Response
+
+```json
+{
+  "uuid": "6e2f4c1a-8d5b-4f0e-9a51-2b7c3d4e5f60",
+  "name": "Postgres upgrade",
+  "start": "2026-11-07T20:00:00+00:00",
+  "end": "2026-11-07T21:30:00+00:00",
+  "scope": "tags",
+  "tags": "db prod",
+  "state": "upcoming",
+  "created": "2026-11-01T09:12:44+00:00",
+  "created_via": "dashboard"
+}
+```
+
+
+## End a Maintenance Window {: #end-maintenance .rule }
+
+`POST SITE_ROOT/api/v3/maintenance/<uuid>/end`
+
+Ends an active maintenance window early: SITE_NAME sets its end time to the
+current time. After the last maintenance window covering a check ends, SITE_NAME
+sends one alert for the check if it is still down.
+This API call requires the read-write API key.
+
+This API call has no request parameters.
+
+### Response Codes
+
+200 OK
+:   The maintenance window was successfully ended.
+
+401 Unauthorized
+:   The API key is either missing or invalid.
+
+403 Forbidden
+:   Access denied, wrong API key.
+
+404 Not Found
+:   The specified maintenance window does not exist.
+
+409 Conflict
+:   The maintenance window is not active. The response body contains the error
+    message "maintenance window is not active".
+
+### Example Request
+
+```bash
+curl SITE_ROOT/api/v3/maintenance/6e2f4c1a-8d5b-4f0e-9a51-2b7c3d4e5f60/end \
+    --request POST --header "X-Api-Key: your-api-key" --data ""
+```
+
+Note: the `--data ""` argument forces curl to send a `Content-Length` request header
+even though the request body is empty. For HTTP POST requests, the `Content-Length`
+header is sometimes required by some network proxies and web servers.
+
+### Example Response
+
+```json
+{
+  "uuid": "6e2f4c1a-8d5b-4f0e-9a51-2b7c3d4e5f60",
+  "name": "Postgres upgrade",
+  "start": "2026-11-07T20:00:00+00:00",
+  "end": "2026-11-07T20:47:13+00:00",
+  "scope": "tags",
+  "tags": "db prod",
+  "state": "ended",
+  "created": "2026-11-01T09:12:44+00:00",
+  "created_via": "dashboard"
+}
+```
+
+
+## Delete a Maintenance Window {: #delete-maintenance .rule }
+
+`DELETE SITE_ROOT/api/v3/maintenance/<uuid>`
+
+Permanently deletes an upcoming maintenance window. Returns JSON representation
+of the maintenance window that was just deleted. To stop an active maintenance
+window, [end it](#end-maintenance) instead.
+This API call requires the read-write API key.
+
+This API call has no request parameters.
+
+### Response Codes
+
+200 OK
+:   The maintenance window was successfully deleted.
+
+401 Unauthorized
+:   The API key is either missing or invalid.
+
+403 Forbidden
+:   Access denied, wrong API key.
+
+404 Not Found
+:   The specified maintenance window does not exist.
+
+409 Conflict
+:   The maintenance window is active or has ended. The response body contains
+    the error message "only upcoming maintenance windows can be deleted".
+
+### Example Request
+
+```bash
+curl SITE_ROOT/api/v3/maintenance/6e2f4c1a-8d5b-4f0e-9a51-2b7c3d4e5f60 \
+    --request DELETE --header "X-Api-Key: your-api-key"
+```
+
+### Example Response
+
+```json
+{
+  "uuid": "6e2f4c1a-8d5b-4f0e-9a51-2b7c3d4e5f60",
+  "name": "Postgres upgrade",
+  "start": "2026-11-07T20:00:00+00:00",
+  "end": "2026-11-07T21:30:00+00:00",
+  "scope": "tags",
+  "tags": "db prod",
+  "state": "upcoming",
+  "created": "2026-11-01T09:12:44+00:00",
+  "created_via": "dashboard"
 }
 ```
 

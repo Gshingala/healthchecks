@@ -9,7 +9,8 @@ from django.core import mail
 from django.test.utils import override_settings
 from django.utils.timezone import now
 
-from hc.api.models import Check, Flip
+from hc.accounts.models import Member
+from hc.api.models import Check, Flip, MaintenanceWindow
 from hc.test import BaseTestCase
 
 CURRENT_TIME = datetime(2020, 1, 13, 2, tzinfo=timezone.utc)
@@ -307,3 +308,111 @@ class ProfileModelTestCase(BaseTestCase):
         self.profile.next_nag_date = now()
         self.profile.update_next_nag_date()
         self.assertIsNone(self.profile.next_nag_date)
+
+    def _add_membership_in_bobs_project(self) -> None:
+        Member.objects.create(
+            user=self.alice, project=self.bobs_project, role=Member.Role.REGULAR
+        )
+
+    def _add_window(self, start: datetime, end: datetime, tags: str = "") -> None:
+        MaintenanceWindow.objects.create(
+            project=self.project,
+            name="Planned work",
+            start=start,
+            end=end,
+            tags=tags,
+            created_via="api",
+        )
+
+    def test_it_sets_next_nag_date_with_down_checks_in_two_projects(self) -> None:
+        self._add_membership_in_bobs_project()
+        self.check.status = "up"
+        self.check.save()
+        Check.objects.create(project=self.bobs_project, status="down")
+
+        self.profile.nag_period = td(hours=1)
+        self.profile.update_next_nag_date()
+        self.assertIsNotNone(self.profile.next_nag_date)
+
+    def test_it_clears_next_nag_date_with_two_projects_all_up(self) -> None:
+        self._add_membership_in_bobs_project()
+        self.check.status = "up"
+        self.check.save()
+        Check.objects.create(project=self.bobs_project, status="up")
+
+        self.profile.next_nag_date = now()
+        self.profile.update_next_nag_date()
+        self.assertIsNone(self.profile.next_nag_date)
+
+    def test_it_clears_next_nag_date_if_down_checks_covered(self) -> None:
+        self._add_window(now() - td(minutes=5), now() + td(hours=1))
+
+        self.profile.nag_period = td(hours=1)
+        self.profile.next_nag_date = now()
+        self.profile.update_next_nag_date()
+        self.assertIsNone(self.profile.next_nag_date)
+
+        self.profile.refresh_from_db()
+        self.assertIsNone(self.profile.next_nag_date)
+
+    def test_it_does_not_set_next_nag_date_if_down_checks_covered(self) -> None:
+        self._add_window(now() - td(minutes=5), now() + td(hours=1))
+
+        self.profile.nag_period = td(hours=1)
+        self.profile.update_next_nag_date()
+        self.assertIsNone(self.profile.next_nag_date)
+
+    def test_it_sets_next_nag_date_if_window_upcoming(self) -> None:
+        self._add_window(now() + td(minutes=5), now() + td(hours=1))
+
+        self.profile.nag_period = td(hours=1)
+        self.profile.update_next_nag_date()
+        self.assertIsNotNone(self.profile.next_nag_date)
+
+    def test_it_sets_next_nag_date_if_one_down_check_not_covered(self) -> None:
+        self.check.tags = "db"
+        self.check.save()
+        Check.objects.create(project=self.project, status="down", tags="web")
+        self._add_window(now() - td(minutes=5), now() + td(hours=1), tags="db")
+
+        self.profile.nag_period = td(hours=1)
+        self.profile.update_next_nag_date()
+        self.assertIsNotNone(self.profile.next_nag_date)
+
+    def test_nag_query_budget(self) -> None:
+        # The check is down and next_nag_date is already set, so no save
+        self.profile.nag_period = td(hours=1)
+        self.profile.next_nag_date = now()
+
+        # No windows: one query, same as before maintenance windows existed
+        with self.assertNumQueries(1):
+            self.profile.update_next_nag_date()
+
+        # A covering window adds at most one query
+        self._add_window(now() - td(minutes=5), now() + td(hours=1), tags="other")
+        with self.assertNumQueries(2):
+            self.profile.update_next_nag_date()
+
+    def test_send_nag_skips_covered_checks(self) -> None:
+        self.check.tags = "db"
+        self.check.save()
+        Check.objects.create(
+            project=self.project, name="Bar", status="down", last_ping=now()
+        )
+        self._add_window(now() - td(minutes=5), now() + td(hours=1), tags="db")
+
+        self.profile.nag_period = td(hours=1)
+        sent = self.profile.send_report(nag=True)
+        self.assertTrue(sent)
+
+        self.assertEqual(mail.outbox[0].subject, "Reminder: 1 check still down")
+        self.assertEmailContains("Bar")
+        self.assertEmailNotContains("Foo")
+
+    def test_send_nag_noops_if_all_down_checks_covered(self) -> None:
+        self._add_window(now() - td(minutes=5), now() + td(hours=1))
+
+        self.profile.nag_period = td(hours=1)
+        sent = self.profile.send_report(nag=True)
+        self.assertFalse(sent)
+        self.assertEqual(len(mail.outbox), 0)

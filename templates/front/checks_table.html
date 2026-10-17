@@ -76,6 +76,7 @@
                 {% for tag in check.tags_list %}
                 <span class="label label-tag">{{ tag }}</span>
                 {% endfor %}
+                {% if check.maintenance_window %}{% include "front/maintenance_label.html" with mw=check.maintenance_window tz=profile_tz %}{% endif %}
             </div>
         </td>
         <td class="hidden-xs hidden-sm hidden-md">

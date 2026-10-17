@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from django.utils.timezone import now
 
-from hc.api.models import Channel, Check
+from hc.api.models import Channel, Check, MaintenanceWindow
 from hc.lib.typealias import JSONDict
 from hc.test import BaseTestCase, TestHttpResponse
 
@@ -483,3 +483,25 @@ class UpdateCheckTestCase(BaseTestCase):
         self.post(
             self.check.code, {"tags": "X" * 501}, expect_fragment="tags is too long"
         )
+
+    def add_window(self, start_offset: td = td(minutes=-5)) -> None:
+        start = now() + start_offset
+        MaintenanceWindow.objects.create(
+            project=self.project,
+            name="Deploy",
+            start=start,
+            end=start + td(hours=1),
+            created_via="api",
+        )
+
+    def test_it_reports_maintenance(self) -> None:
+        self.add_window()
+        for v in (1, 2, 3):
+            r = self.post(self.check.code, {"name": "Foo"}, v=v)
+            self.assertEqual(r.status_code, 200)
+            self.assertTrue(r.json()["maintenance"])
+
+    def test_it_reports_upcoming_window_as_no_maintenance(self) -> None:
+        self.add_window(start_offset=td(hours=1))
+        r = self.post(self.check.code, {"name": "Foo"}, v=3)
+        self.assertFalse(r.json()["maintenance"])

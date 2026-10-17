@@ -4,9 +4,12 @@ import json
 import re
 from datetime import datetime, timezone
 from datetime import timedelta as td
+from typing import Any
+from zoneinfo import ZoneInfo
 
 from django import forms
 
+from hc.api.models import MaintenanceWindow
 from hc.front.validators import (
     CronValidator,
     OnCalendarValidator,
@@ -74,6 +77,131 @@ class AddCheckForm(NameTagsForm):
 
         assert isinstance(self.cleaned_data["schedule"], str)
         return self.cleaned_data["schedule"]
+
+
+MAINTENANCE_FORM_ERRORS: dict[str, str] = {
+    "end_before_start": "End must be after start.",
+    "end_in_past": "End must be in the future.",
+    "too_long": "A maintenance window can be at most 30 days long.",
+    "limit": "This project already has 100 upcoming or active maintenance "
+    "windows. End or delete one before adding another.",
+}
+NONEXISTENT_TIME_ERROR = (
+    "{} does not exist in {} because of a daylight-saving change. Choose another time."
+)
+SCOPE_CHOICES = (("all", "All checks"), ("tags", "Checks with all of these tags"))
+
+
+def _messages(message: str, *codes: str) -> dict[str, str]:
+    return {code: message for code in ("required", "invalid", *codes)}
+
+
+class MaintenanceScopeForm(forms.Form):
+    name = forms.CharField(
+        max_length=100,
+        error_messages=_messages("Enter a name of 1 to 100 characters.", "max_length"),
+    )
+    scope = forms.ChoiceField(
+        choices=SCOPE_CHOICES,
+        error_messages=_messages("Choose a scope.", "invalid_choice"),
+    )
+    tags = forms.CharField(
+        max_length=500,
+        required=False,
+        error_messages={"max_length": "Tags can be at most 500 characters."},
+    )
+
+    def clean_tags(self) -> str:
+        return MaintenanceWindow.normalize_tags(self.cleaned_data["tags"])
+
+    def clean(self) -> dict[str, Any]:
+        cleaned_data = super().clean()
+        assert cleaned_data is not None
+        scope = cleaned_data.get("scope")
+        if scope == "all":
+            cleaned_data["tags"] = ""
+        elif scope == "tags" and cleaned_data.get("tags") == "":
+            self.add_error("tags", "Enter at least one tag.")
+        return cleaned_data
+
+
+class MaintenanceWindowForm(MaintenanceScopeForm):
+    start_date = forms.DateField(
+        input_formats=["%Y-%m-%d"],
+        error_messages=_messages("Enter a valid start date and time."),
+    )
+    start_time = forms.TimeField(
+        input_formats=["%H:%M"],
+        error_messages=_messages("Enter a valid start date and time."),
+    )
+    end_date = forms.DateField(
+        input_formats=["%Y-%m-%d"],
+        error_messages=_messages("Enter a valid end date and time."),
+    )
+    end_time = forms.TimeField(
+        input_formats=["%H:%M"],
+        error_messages=_messages("Enter a valid end date and time."),
+    )
+
+    def __init__(self, *args: Any, tz: str, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.tz = tz
+
+    def _to_utc(self, prefix: str) -> datetime | None:
+        """Combine the local date and time fields into an aware UTC datetime.
+
+        Ambiguous local times resolve to their first occurrence (fold=0).
+        Return None and add an error if the local time does not exist.
+        """
+        d = self.cleaned_data.get(f"{prefix}_date")
+        t = self.cleaned_data.get(f"{prefix}_time")
+        if d is None or t is None:
+            return None
+
+        tzinfo = ZoneInfo(self.tz)
+        local = datetime.combine(d, t, tzinfo=tzinfo)
+        result = local.astimezone(timezone.utc)
+        # A nonexistent local time does not survive the round trip unchanged
+        if result.astimezone(tzinfo).replace(tzinfo=None) != local.replace(tzinfo=None):
+            label = local.strftime("%Y-%m-%d %H:%M")
+            self.add_error(
+                f"{prefix}_date", NONEXISTENT_TIME_ERROR.format(label, self.tz)
+            )
+            return None
+        return result
+
+    def clean(self) -> dict[str, Any]:
+        cleaned_data = super().clean()
+        start, end = self._to_utc("start"), self._to_utc("end")
+        if start and end:
+            cleaned_data["start"] = start
+            cleaned_data["end"] = end
+        return cleaned_data
+
+    def apply_times(
+        self, at: datetime, *, original_start: datetime | None = None
+    ) -> tuple[datetime, datetime] | None:
+        start = self.cleaned_data["start"] if original_start is None else original_start
+        try:
+            return MaintenanceWindow.clean_times(
+                start,
+                self.cleaned_data["end"],
+                at=at,
+                move_start=original_start is None,
+            )
+        except MaintenanceWindow.Invalid as e:
+            self.add_error("end_date", MAINTENANCE_FORM_ERRORS[e.code])
+            return None
+
+
+class StartNowForm(MaintenanceScopeForm):
+    duration_minutes = forms.IntegerField(
+        min_value=1,
+        max_value=43200,
+        error_messages=_messages(
+            "Enter a length of 1 to 43200 minutes.", "min_value", "max_value"
+        ),
+    )
 
 
 class FilteringRulesForm(forms.Form):

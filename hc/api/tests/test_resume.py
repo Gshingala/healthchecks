@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from datetime import timedelta as td
 
-from hc.api.models import Check, Flip
+from django.utils.timezone import now
+
+from hc.api.models import Check, Flip, MaintenanceWindow
 from hc.test import BaseTestCase
 
 
@@ -48,6 +51,7 @@ class ResumeTestCase(BaseTestCase):
         )
 
         self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.content.decode(), "check is not paused")
 
     def test_it_accepts_api_key_in_post_body(self) -> None:
         payload = {"api_key": "X" * 32}
@@ -97,3 +101,28 @@ class ResumeTestCase(BaseTestCase):
         self.assertEqual(
             r.json()["error"], "json validation error: value is not an object"
         )
+
+    def add_window(self, start_offset: td = td(minutes=-5)) -> None:
+        start = now() + start_offset
+        MaintenanceWindow.objects.create(
+            project=self.project,
+            name="Deploy",
+            start=start,
+            end=start + td(hours=1),
+            created_via="api",
+        )
+
+    def test_it_reports_maintenance(self) -> None:
+        self.add_window()
+        r = self.csrf_client.post(
+            self.url, "", content_type="application/json", HTTP_X_API_KEY="X" * 32
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["maintenance"])
+
+    def test_it_reports_upcoming_window_as_no_maintenance(self) -> None:
+        self.add_window(start_offset=td(hours=1))
+        r = self.csrf_client.post(
+            self.url, "", content_type="application/json", HTTP_X_API_KEY="X" * 32
+        )
+        self.assertFalse(r.json()["maintenance"])

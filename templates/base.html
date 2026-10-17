@@ -38,6 +38,7 @@
     <link rel="stylesheet" href="{% static 'css/icomoon.css' %}" type="text/css">
     <link rel="stylesheet" href="{% static 'css/log.css' %}" type="text/css">
     <link rel="stylesheet" href="{% static 'css/login.css' %}" type="text/css">
+    <link rel="stylesheet" href="{% static 'css/maintenance.css' %}" type="text/css">
     <link rel="stylesheet" href="{% static 'css/checks.css' %}" type="text/css">
     <link rel="stylesheet" href="{% static 'css/update_timeout_modal.css' %}" type="text/css">
     <link rel="stylesheet" href="{% static 'css/checks_table.css' %}" type="text/css">
@@ -133,6 +134,10 @@
 
                 <li {% if page == 'badges' %} class="active" {% endif %}>
                     <a href="{% url 'hc-badges' project.code %}">Badges</a>
+                </li>
+
+                <li {% if page == 'maintenance' %} class="active" {% endif %}>
+                    <a href="{% url 'hc-maintenance' project.code %}">Maintenance</a>
                 </li>
 
                 <li {% if page == 'project' %} class="active" {% endif %}>

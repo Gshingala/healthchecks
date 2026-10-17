@@ -6,11 +6,11 @@ import os
 import re
 import sqlite3
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from datetime import timedelta as td
 from itertools import islice
-from typing import TypedDict, cast
+from typing import Any, TypedDict, cast
 from urllib.parse import urlencode, urlparse
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -47,6 +47,7 @@ from hc.api.models import (
     Channel,
     Check,
     Flip,
+    MaintenanceWindow,
     Notification,
     Ping,
     prepare_durations,
@@ -68,6 +69,19 @@ from hc.lib.urls import absolute_reverse
 logger = logging.getLogger(__name__)
 
 VALID_SORT_VALUES = ("name", "-name", "last_ping", "-last_ping", "created")
+MAINTENANCE_PREVIEW_LIMIT = 20
+MAINTENANCE_TAGS_MAX_LENGTH = 500
+MAINTENANCE_STARTED = (
+    "This window has already started. Only its name and end time can be changed."
+)
+MAINTENANCE_ENDED = "This maintenance window has ended and can no longer be changed."
+MAINTENANCE_NOT_UPCOMING = (
+    "Only upcoming maintenance windows can be deleted. "
+    "Use End now to stop an active window."
+)
+MAINTENANCE_NOT_STARTED = (
+    "This maintenance window has not started yet. Delete it instead."
+)
 STATUS_TEXT_TMPL = get_template("front/log_status_text.html")
 LAST_PING_TMPL = get_template("front/last_ping_cell.html")
 EVENTS_TMPL = get_template("front/details_events.html")
@@ -238,7 +252,9 @@ def checks(request: AuthenticatedHttpRequest, code: UUID) -> HttpResponse:
 
     q = Check.objects.filter(project=project)
     q = q.select_related("project")
+    q = MaintenanceWindow.objects.flag_checks(q, now())
     checks = list(q.prefetch_related("channel_set"))
+    MaintenanceWindow.objects.set_coverage(checks, now())
     sortchecks(checks, request.profile.sort)
 
     tags_counts, num_down = _tags_counts(checks)
@@ -956,7 +972,30 @@ def _get_events(
     # Sort events by the timestamp.
     # If timestamps are equal, put flips chronologically after pings
     events.sort(key=lambda el: (el.created, isinstance(el, Flip)), reverse=True)
-    return events[:page_limit]
+    events = events[:page_limit]
+    _set_withheld_window_names(check, events)
+    return events
+
+
+def _set_withheld_window_names(check: Check, events: Sequence[object]) -> None:
+    """Set flip.withheld_window_name on every withheld flip in `events`.
+
+    Only windows in the check's current project are looked up, so a window
+    from a project the check was moved out of stays unnamed (L-6). Issues no
+    query if no flip was withheld, otherwise exactly one.
+    """
+    flips: dict[UUID, list[Flip]] = defaultdict(list)
+    for event in events:
+        if isinstance(event, Flip) and event.withheld and event.withheld_window:
+            flips[event.withheld_window].append(event)
+    if not flips:
+        return
+
+    q = MaintenanceWindow.objects.filter(project_id=check.project_id, code__in=flips)
+    names = dict(q.values_list("code", "name"))
+    for window_code, window_flips in flips.items():
+        for flip in window_flips:
+            flip.withheld_window_name = names.get(window_code)
 
 
 @login_required
@@ -1015,6 +1054,8 @@ def details(request: AuthenticatedHttpRequest, code: UUID) -> HttpResponse:
         channels = group_channels if channel.kind == "group" else regular_channels
         channels.append(channel)
 
+    check.maintenance_window = MaintenanceWindow.objects.covering(check, now())
+
     all_tags = set()
     sibling_checks = Check.objects.filter(project=check.project).only("tags", "tz")
     for sibling in sibling_checks:
@@ -1038,7 +1079,22 @@ def details(request: AuthenticatedHttpRequest, code: UUID) -> HttpResponse:
         "all_tags": " ".join(sorted(all_tags)),
     }
 
+    if rw:
+        ctx["start_now_form"] = _start_now_form_for(check)
+        ctx["mw_all_tags"] = sorted(all_tags, key=lambda s: s.lower())
+
     return render(request, "front/details.html", ctx)
+
+
+def _start_now_form_for(check: Check) -> forms.StartNowForm:
+    """Return a Start now form pre-filled to cover `check` (REQ-1.7)."""
+    max_length = MaintenanceWindow._meta.get_field("name").max_length
+    initial = {
+        "name": f"Maintenance: {check.name_then_code()}"[:max_length],
+        "scope": "tags" if check.tags.strip() else "all",
+        "tags": check.tags,
+    }
+    return forms.StartNowForm(initial=initial)
 
 
 @login_required
@@ -1199,6 +1255,271 @@ def badges(request: AuthenticatedHttpRequest, code: UUID) -> HttpResponse:
         "url": get_badge_url(project.badge_key, "*"),
     }
     return render(request, "front/badges.html", ctx)
+
+
+def _maintenance_edit_form(
+    mw: MaintenanceWindow, tz: str
+) -> forms.MaintenanceWindowForm:
+    tzinfo = ZoneInfo(tz)
+    start, end = mw.start.astimezone(tzinfo), mw.end.astimezone(tzinfo)
+    initial = {
+        "name": mw.name,
+        "start_date": start.strftime("%Y-%m-%d"),
+        "start_time": start.strftime("%H:%M"),
+        "end_date": end.strftime("%Y-%m-%d"),
+        "end_time": end.strftime("%H:%M"),
+        "scope": mw.scope,
+        "tags": mw.tags,
+    }
+    return forms.MaintenanceWindowForm(initial=initial, tz=tz)
+
+
+def _get_maintenance_window(project: Project, mw_code: UUID) -> MaintenanceWindow:
+    return get_object_or_404(MaintenanceWindow, project=project, code=mw_code)
+
+
+def _maintenance_error(
+    request: AuthenticatedHttpRequest, project: Project, message: str
+) -> HttpResponse:
+    ctx = _maintenance_ctx(request, project, True)
+    ctx["error_message"] = message
+    return render(request, "front/maintenance.html", ctx, status=400)
+
+
+def _maintenance_ctx(
+    request: AuthenticatedHttpRequest,
+    project: Project,
+    rw: bool,
+    bound_edit_form: tuple[UUID, forms.MaintenanceWindowForm] | None = None,
+) -> dict[str, Any]:
+    at = now()
+    active, upcoming, ended = [], [], []
+    for mw in MaintenanceWindow.objects.filter(project=project).select_related(
+        "created_by"
+    ):
+        state = mw.state(at)
+        if state == "active":
+            active.append(mw)
+        elif state == "upcoming":
+            upcoming.append(mw)
+        else:
+            ended.append(mw)
+
+    active.sort(key=lambda mw: mw.end)
+    upcoming.sort(key=lambda mw: mw.start)
+    ended.sort(key=lambda mw: mw.end, reverse=True)
+
+    all_tags: set[str] = set()
+    for check in project.check_set.only("tags"):
+        all_tags.update(check.tags_list())
+
+    tz = request.profile.tz
+    edit_modals = []
+    for mw in active + upcoming:
+        if bound_edit_form and bound_edit_form[0] == mw.code:
+            form = bound_edit_form[1]
+        else:
+            form = _maintenance_edit_form(mw, tz)
+        edit_modals.append((mw, form, mw in active))
+
+    return {
+        "page": "maintenance",
+        "project": project,
+        "rw": rw,
+        "tz": tz,
+        "active": active,
+        "upcoming": upcoming,
+        "ended": ended,
+        "all_tags": sorted(all_tags, key=lambda s: s.lower()),
+        "form": forms.MaintenanceWindowForm(tz=tz),
+        "start_now_form": forms.StartNowForm(),
+        "edit_modals": edit_modals,
+    }
+
+
+@login_required
+def maintenance(request: AuthenticatedHttpRequest, code: UUID) -> HttpResponse:
+    project, rw = _get_project_for_user(request, code)
+    MaintenanceWindow.objects.prune(project, now())
+    ctx = _maintenance_ctx(request, project, rw)
+    return render(request, "front/maintenance.html", ctx)
+
+
+@require_POST
+@login_required
+def add_maintenance(request: AuthenticatedHttpRequest, code: UUID) -> HttpResponse:
+    project = _get_rw_project_for_user(request, code)
+
+    form: forms.MaintenanceWindowForm | forms.StartNowForm
+    if "duration_minutes" in request.POST:
+        form = forms.StartNowForm(request.POST)
+        open_modal, form_key = "start-now", "start_now_form"
+    else:
+        form = forms.MaintenanceWindowForm(request.POST, tz=request.profile.tz)
+        open_modal, form_key = "add", "form"
+
+    at = now()
+    MaintenanceWindow.objects.prune(project, at)
+
+    times = None
+    if form.is_valid():
+        if isinstance(form, forms.StartNowForm):
+            start = at.replace(microsecond=0)
+            end = start + td(minutes=form.cleaned_data["duration_minutes"])
+            times = MaintenanceWindow.clean_times(start, end, at=at)
+        else:
+            times = form.apply_times(at)
+
+    if times:
+        try:
+            MaintenanceWindow.objects.assert_can_add(project, at)
+        except MaintenanceWindow.Invalid as e:
+            form.add_error(None, forms.MAINTENANCE_FORM_ERRORS[e.code])
+            times = None
+
+    if not times:
+        ctx = _maintenance_ctx(request, project, True)
+        ctx[form_key] = form
+        ctx["open_modal"] = open_modal
+        return render(request, "front/maintenance.html", ctx)
+
+    start, end = times
+    MaintenanceWindow.objects.create(
+        project=project,
+        name=form.cleaned_data["name"],
+        start=start,
+        end=end,
+        tags=form.cleaned_data["tags"],
+        created_by=request.user,
+        created_via="dashboard",
+    )
+    project.update_next_nag_dates()
+
+    if open_modal == "start-now":
+        messages.success(request, "Maintenance window started.")
+    else:
+        messages.success(request, "Maintenance window scheduled.")
+    return redirect("hc-maintenance", project.code)
+
+
+def _changes_start_or_scope(
+    form: forms.MaintenanceWindowForm, mw: MaintenanceWindow
+) -> bool:
+    # The form only carries minutes, so the stored start's seconds are ignored
+    if form.cleaned_data["start"] != mw.start.replace(second=0, microsecond=0):
+        return True
+    tags: str = form.cleaned_data["tags"]
+    return tags != MaintenanceWindow.normalize_tags(mw.tags)
+
+
+@require_POST
+@login_required
+def edit_maintenance(
+    request: AuthenticatedHttpRequest, code: UUID, mw_code: UUID
+) -> HttpResponse:
+    project = _get_rw_project_for_user(request, code)
+    mw = _get_maintenance_window(project, mw_code)
+
+    at = now()
+    state = mw.state(at)
+    if state == "ended":
+        return _maintenance_error(request, project, MAINTENANCE_ENDED)
+
+    form = forms.MaintenanceWindowForm(request.POST, tz=request.profile.tz)
+    times = None
+    if form.is_valid():
+        if state == "active" and _changes_start_or_scope(form, mw):
+            form.add_error(None, MAINTENANCE_STARTED)
+        elif state == "active":
+            times = form.apply_times(at, original_start=mw.start)
+        else:
+            times = form.apply_times(at)
+
+    if not times:
+        ctx = _maintenance_ctx(request, project, True, (mw.code, form))
+        ctx["open_modal"] = f"edit-{mw.code}"
+        return render(request, "front/maintenance.html", ctx)
+
+    mw.name = form.cleaned_data["name"]
+    mw.start, mw.end = times
+    mw.tags = form.cleaned_data["tags"]
+    mw.save()
+    project.update_next_nag_dates()
+
+    messages.success(request, "Maintenance window updated.")
+    return redirect("hc-maintenance", project.code)
+
+
+@require_POST
+@login_required
+def end_maintenance(
+    request: AuthenticatedHttpRequest, code: UUID, mw_code: UUID
+) -> HttpResponse:
+    project = _get_rw_project_for_user(request, code)
+    mw = _get_maintenance_window(project, mw_code)
+
+    at = now()
+    state = mw.state(at)
+    if state == "ended":
+        return _maintenance_error(request, project, MAINTENANCE_ENDED)
+    if state == "upcoming":
+        return _maintenance_error(request, project, MAINTENANCE_NOT_STARTED)
+
+    mw.end = at.replace(microsecond=0)
+    mw.save()
+    project.update_next_nag_dates()
+
+    messages.success(request, "Maintenance window ended.")
+    return redirect("hc-maintenance", project.code)
+
+
+@require_POST
+@login_required
+def remove_maintenance(
+    request: AuthenticatedHttpRequest, code: UUID, mw_code: UUID
+) -> HttpResponse:
+    project = _get_rw_project_for_user(request, code)
+    mw = _get_maintenance_window(project, mw_code)
+
+    if mw.state(now()) != "upcoming":
+        return _maintenance_error(request, project, MAINTENANCE_NOT_UPCOMING)
+
+    mw.delete()
+    project.update_next_nag_dates()
+
+    messages.success(request, "Maintenance window deleted.")
+    return redirect("hc-maintenance", project.code)
+
+
+@login_required
+def maintenance_preview(request: AuthenticatedHttpRequest, code: UUID) -> HttpResponse:
+    project, _rw = _get_project_for_user(request, code)
+
+    tags = request.GET.get("tags", "")
+    if len(tags) > MAINTENANCE_TAGS_MAX_LENGTH:
+        return JsonResponse({"error": "tags is too long"}, status=400)
+
+    scope = request.GET.get("scope", "all")
+    if scope not in ("all", "tags"):
+        return JsonResponse({"error": "invalid scope"}, status=400)
+
+    checks = list(project.check_set.all())
+    tag_set = set(tags.split()) if scope == "tags" else set()
+    if tag_set:
+        checks = [check for check in checks if check.matches_tag_set(tag_set)]
+
+    checks.sort(key=lambda check: check.name_then_code())
+    doc = {
+        "count": len(checks),
+        "checks": [
+            {
+                "name": check.name_then_code(),
+                "url": reverse("hc-details", args=[check.code]),
+            }
+            for check in checks[:MAINTENANCE_PREVIEW_LIMIT]
+        ],
+    }
+    return JsonResponse(doc)
 
 
 @login_required

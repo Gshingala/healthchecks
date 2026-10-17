@@ -6,7 +6,8 @@ from unittest.mock import Mock, patch
 
 from django.utils.timezone import now
 
-from hc.api.models import Channel, Check, Notification, Ping
+from hc.accounts.models import Project
+from hc.api.models import Channel, Check, Flip, MaintenanceWindow, Notification, Ping
 from hc.test import BaseTestCase
 
 
@@ -145,3 +146,49 @@ class LogTestCase(BaseTestCase):
         # The notification should not show up in the log as it is
         # older than the oldest visible ping:
         self.assertNotContains(r, "Sent email to alice@example.org", status_code=200)
+
+    def add_withheld_flip(
+        self, project: Project | None = None, name: str = "Postgres upgrade"
+    ) -> Flip:
+        window = MaintenanceWindow.objects.create(
+            project=project or self.project,
+            name=name,
+            start=now() - td(hours=2),
+            end=now() + td(hours=1),
+            created_via="dashboard",
+        )
+        return Flip.objects.create(
+            owner=self.check,
+            created=now(),
+            old_status="up",
+            new_status="down",
+            withheld=now(),
+            withheld_window=window.code,
+        )
+
+    def test_it_shows_withheld_window_name(self) -> None:
+        self.add_withheld_flip()
+        self.client.login(username="alice@example.org", password="password")
+        html = self.client.get(self.url).content.decode()
+        self.assertIn('Alert not sent: maintenance window "Postgres upgrade"', html)
+
+    def test_it_omits_name_of_deleted_window(self) -> None:
+        self.add_withheld_flip()
+        MaintenanceWindow.objects.filter(project=self.project).delete()
+        self.client.login(username="alice@example.org", password="password")
+        html = self.client.get(self.url).content.decode()
+        self.assertIn("Alert not sent: maintenance window</span>", html)
+
+    def test_it_omits_name_of_window_from_another_project(self) -> None:
+        self.add_withheld_flip(project=self.bobs_project)
+        self.client.login(username="alice@example.org", password="password")
+        html = self.client.get(self.url).content.decode()
+        self.assertIn("Alert not sent: maintenance window</span>", html)
+        self.assertNotIn("Postgres upgrade", html)
+
+    def test_it_escapes_withheld_window_name(self) -> None:
+        self.add_withheld_flip(name="<script>alert(1)</script>")
+        self.client.login(username="alice@example.org", password="password")
+        html = self.client.get(self.url).content.decode()
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)

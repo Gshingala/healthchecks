@@ -3,8 +3,11 @@ from __future__ import annotations
 import logging
 import signal
 import time
+import uuid
 from argparse import ArgumentParser
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import datetime
 from datetime import timedelta as td
 from threading import BoundedSemaphore
 from types import FrameType
@@ -13,12 +16,22 @@ from typing import Any
 from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import close_old_connections, connection
+from django.db.models import Max
 from django.utils.timezone import now
 
-from hc.api.models import Check, Flip
+from hc.api.models import Check, Flip, MaintenanceWindow
 from hc.lib.statsd import statsd
 
 logger = logging.getLogger("hc")
+
+END_OF_WINDOW_INTERVAL = td(seconds=15)
+
+
+@dataclass
+class WithholdDecision:
+    window_code: uuid.UUID | None
+    # Up flips only: the earlier withheld, unreleased down flip
+    supersede: Flip | None
 
 
 def notify(flip: Flip) -> str | None:
@@ -55,6 +68,29 @@ def notify(flip: Flip) -> str | None:
     return "\n".join(logs)
 
 
+def notify_withheld(flip: Flip) -> str:
+    # See notify() for why close_old_connections() is called here.
+    if not connection.in_atomic_block:
+        close_old_connections()
+
+    # Nag dates follow check statuses, which a maintenance window never changes
+    check = flip.owner
+    check.project.update_next_nag_dates()
+    reason = f"alert withheld: maintenance window {flip.withheld_window}"
+    return f"{check.code} goes {flip.new_status} ({reason})"
+
+
+def notify_end_of_window(flip: Flip) -> str:
+    # The alert itself is the regular one, only the log line tells them apart
+    headline = f"{flip.owner.code} goes down (end of maintenance)"
+    logs = notify(flip)
+    if logs is None:
+        return headline
+
+    channel_lines = logs.split("\n")[1:]
+    return "\n".join([headline, *channel_lines])
+
+
 class Command(BaseCommand):
     help = "Sends UP/DOWN email alerts"
 
@@ -63,6 +99,8 @@ class Command(BaseCommand):
         self.executor = ThreadPoolExecutor(max_workers=10)
         self.seats = BoundedSemaphore(10)
         self.shutdown = False
+        # None makes the first loop iteration run the pass right away
+        self.next_end_of_window_pass: datetime | None = None
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument(
@@ -88,6 +126,58 @@ class Command(BaseCommand):
             logger.error("Exception in notify", exc_info=exc)
             raise
 
+    def decide_withhold(self, flip: Flip) -> WithholdDecision | None:
+        """Decide whether to withhold the flip's notifications.
+
+        Return None if the flip should be delivered as usual.
+
+        """
+
+        if flip.new_status == "down":
+            window = MaintenanceWindow.objects.covering(flip.owner, flip.created)
+            if window is None:
+                return None
+            return WithholdDecision(window_code=window.code, supersede=None)
+
+        if flip.new_status == "up" and flip.old_status == "down":
+            # The up flip pairs with the down flip immediately before it.
+            # If that one was withheld, withhold this one too, regardless
+            # of whether a window still covers the check.
+            q = Flip.objects.filter(owner_id=flip.owner_id, created__lt=flip.created)
+            previous = q.order_by("-created").first()
+            if previous is None or previous.new_status != "down":
+                return None
+            if not previous.is_withheld_unreleased():
+                return None
+            return WithholdDecision(
+                window_code=previous.withheld_window, supersede=previous
+            )
+
+        return None
+
+    def supersede(self, down_flip: Flip) -> bool:
+        """Mark a withheld down flip as superseded by its up flip.
+
+        Return False if the down flip has been released (or deleted) meanwhile,
+        in which case the up flip must be delivered.
+
+        """
+
+        if down_flip.withheld_outcome == "superseded":
+            return True
+
+        q = Flip.objects.filter(id=down_flip.id, withheld_outcome=None)
+        if q.update(withheld_outcome="superseded") == 1:
+            return True
+
+        # Another process set the outcome first, find out which one
+        outcome = (
+            Flip.objects.filter(id=down_flip.id)
+            .values_list("withheld_outcome", flat=True)
+            .first()
+        )
+        return outcome == "superseded"
+
     def process_one_flip(self) -> bool:
         """Find unprocessed flip, send notifications.
 
@@ -102,21 +192,51 @@ class Command(BaseCommand):
         if not self.seats.acquire(timeout=1):
             return False  # Workers busy, main thread should wait a bit
 
-        flip = Flip.objects.filter(processed=None).first()
+        flip = Flip.objects.filter(processed=None).select_related("owner").first()
         if flip is None:
             self.seats.release()
             return False  # No work found, main thread should wait a bit
 
+        try:
+            decision = self.decide_withhold(flip)
+            # Settle the down flip before claiming the up flip, so a
+            # concurrent release cannot leave both alerts unsent.
+            if decision and decision.supersede:
+                if not self.supersede(decision.supersede):
+                    decision = None
+        except Exception:
+            # Fail open: a missed alert is worse than an unwanted one
+            logger.exception(
+                "Exception while deciding whether to withhold flip %d", flip.id
+            )
+            decision = None
+
         # Mark the flip as processed:
         q = Flip.objects.filter(id=flip.id, processed=None)
-        num_updated = q.update(processed=now())
+        if decision is None:
+            num_updated = q.update(processed=now())
+        else:
+            flip.processed = flip.withheld = now()
+            flip.withheld_window = decision.window_code
+            flip.withheld_outcome = "superseded" if decision.supersede else None
+            num_updated = q.update(
+                processed=flip.processed,
+                withheld=flip.withheld,
+                withheld_window=flip.withheld_window,
+                withheld_outcome=flip.withheld_outcome,
+            )
+
         if num_updated != 1:
             self.seats.release()
             # Nothing got updated: another sendalerts process got there first.
             return True
 
         statsd.incr("hc.sendalerts.processFlip")
-        f = self.executor.submit(notify, flip)
+        if decision is None:
+            f = self.executor.submit(notify, flip)
+        else:
+            statsd.incr("hc.sendalerts.withheld")
+            f = self.executor.submit(notify_withheld, flip)
         f.add_done_callback(self.on_notify_done)
         return True
 
@@ -176,6 +296,90 @@ class Command(BaseCommand):
 
         return True
 
+    def handle_ended_windows(self, at: datetime) -> None:
+        """Recompute nag dates once for each window that has ended."""
+
+        q = MaintenanceWindow.objects.filter(end__lte=at, end_handled=None)
+        for window in q.select_related("project"):
+            claim = MaintenanceWindow.objects.filter(id=window.id, end_handled=None)
+            if claim.update(end_handled=at) == 1:
+                window.project.update_next_nag_dates()
+
+    def handle_end_of_window(self) -> int:
+        """Release withheld down flips of checks no window covers any more.
+
+        1. Return right away if there are no pending flips or ended windows.
+        2. Recompute nag dates for projects whose windows have ended.
+        3. For each pending flip, leave it pending if its check is covered,
+           mark it superseded if the check is not down any more or has
+           flipped again, otherwise claim the release and notify.
+
+        Return the number of released flips.
+
+        """
+
+        at = now()
+        pending = Flip.objects.filter(withheld__isnull=False, withheld_outcome=None)
+        ended = MaintenanceWindow.objects.filter(end__lte=at, end_handled=None)
+        gate = pending.values_list("id").union(ended.values_list("id"))
+        if not gate[:1]:
+            return 0
+
+        self.handle_ended_windows(at)
+
+        flips = list(pending)
+        if not flips:
+            return 0
+
+        check_ids = {flip.owner_id for flip in flips}
+        q = Check.objects.filter(id__in=check_ids).select_related("project")
+        checks = {c.id: c for c in MaintenanceWindow.objects.flag_checks(q, at)}
+        MaintenanceWindow.objects.set_coverage(list(checks.values()), at)
+        q_flips = Flip.objects.filter(owner_id__in=check_ids)
+        rows = q_flips.values("owner_id").annotate(latest=Max("created"))
+        latest = {row["owner_id"]: row["latest"] for row in rows}
+
+        num_released = 0
+        for flip in flips:
+            if flip.owner_id not in checks:
+                # The check was deleted after its flips were loaded
+                continue
+            check = flip.owner = checks[flip.owner_id]
+            if check.maintenance_window is not None:
+                continue
+
+            claim = Flip.objects.filter(id=flip.id, withheld_outcome=None)
+            if latest[check.id] > flip.created or check.status != "down":
+                claim.update(withheld_outcome="superseded")
+                continue
+
+            if not self.seats.acquire(timeout=1):
+                break  # Workers busy, retry in the next pass
+
+            if claim.update(withheld_outcome="released") != 1:
+                # Another sendalerts process got there first
+                self.seats.release()
+                continue
+
+            num_released += 1
+            statsd.incr("hc.sendalerts.endOfWindow")
+            f: Future[str | None] = self.executor.submit(notify_end_of_window, flip)
+            f.add_done_callback(self.on_notify_done)
+
+        return num_released
+
+    def maybe_handle_end_of_window(self) -> None:
+        """Run the end-of-window pass if END_OF_WINDOW_INTERVAL has passed."""
+
+        if self.next_end_of_window_pass and now() < self.next_end_of_window_pass:
+            return
+
+        self.next_end_of_window_pass = now() + END_OF_WINDOW_INTERVAL
+        try:
+            self.handle_end_of_window()
+        except Exception:
+            logger.exception("Exception in end-of-window pass")
+
     def on_signal(self, signum: int, frame: FrameType | None) -> None:
         desc = signal.strsignal(signum)
         self.stdout.write(f"{desc}, finishing...\n")
@@ -203,9 +407,13 @@ class Command(BaseCommand):
             while self.handle_going_down() and not self.shutdown:
                 pass
 
-            # Submit unprocessed flips to the self.executor
+            # Submit unprocessed flips to the self.executor. Keep running
+            # the end-of-window pass meanwhile, so a steady stream of flips
+            # does not delay it.
             while self.process_one_flip() and not self.shutdown:
-                pass
+                self.maybe_handle_end_of_window()
+
+            self.maybe_handle_end_of_window()
 
             # Either all workers are busy or there are no unprocessed flips.
             # Wait a bit:

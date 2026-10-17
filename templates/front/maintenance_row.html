@@ -1,0 +1,17 @@
+{% load tz %}
+<tr class="mw-{{ state }}">
+    <td>
+        <div class="mw-name">{{ mw.name }}</div>
+        <div class="mw-created-by">{% if mw.created_by %}Created by {{ mw.created_by.email }}{% elif mw.created_via == "api" %}Created via API{% else %}Created by deleted user{% endif %}</div>
+    </td>
+    <td class="mw-time">{{ mw.start|timezone:tz|date:"M j, Y H:i" }} <span class="mw-tz">{{ tz }}</span></td>
+    <td class="mw-time">{{ mw.end|timezone:tz|date:"M j, Y H:i" }} <span class="mw-tz">{{ tz }}</span></td>
+    <td class="mw-scope">{% if mw.tags %}{% for tag in mw.tags.split %}<span class="label label-tag">{{ tag }}</span> {% endfor %}{% else %}All checks{% endif %}</td>
+    {% if rw %}
+    <td class="actions">
+        {% if state != "ended" %}<button type="button" class="btn btn-sm btn-default" data-toggle="modal" data-target="#edit-{{ mw.code }}">Edit<span class="sr-only"> {{ mw.name }}</span>&hellip;</button>{% endif %}
+        {% if state == "active" %}<button type="button" class="btn btn-sm btn-default" data-toggle="modal" data-target="#end-{{ mw.code }}">End Now<span class="sr-only"> {{ mw.name }}</span>&hellip;</button>{% endif %}
+        {% if state == "upcoming" %}<button type="button" class="btn btn-sm btn-remove" data-toggle="modal" data-target="#remove-{{ mw.code }}">Delete<span class="sr-only"> {{ mw.name }}</span>&hellip;</button>{% endif %}
+    </td>
+    {% endif %}
+</tr>

@@ -36,9 +36,18 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 from pydantic_core import PydanticCustomError
 
 from hc.accounts.models import Profile, Project
-from hc.api.decorators import ApiRequest, authorize, authorize_read, cors
+from hc.api.decorators import ApiRequest, authorize, authorize_read, cors, error
 from hc.api.forms import FlipsFiltersForm
-from hc.api.models import Channel, Check, Flip, Notification, Ping, prepare_durations
+from hc.api.models import (
+    Channel,
+    Check,
+    CheckDict,
+    Flip,
+    MaintenanceWindow,
+    Notification,
+    Ping,
+    prepare_durations,
+)
 from hc.lib.badges import check_signature, get_badge_svg, get_badge_url
 from hc.lib.signing import unsign_bounce_id
 from hc.lib.string import is_valid_uuid_string, match_keywords
@@ -56,6 +65,10 @@ def guess_kind(schedule: str) -> str:
         return "cron"
 
     return "oncalendar"
+
+
+MIN_MAINTENANCE_DURATION = 60
+MAX_MAINTENANCE_DURATION = 2592000
 
 
 class Spec(BaseModel):
@@ -141,6 +154,62 @@ class Spec(BaseModel):
         return None
 
 
+class MaintenanceSpec(BaseModel):
+    name: str
+    start: str | None = None
+    end: str | None = None
+    duration: int | None = None
+    tags: str | None = Field(None, max_length=500)
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_nulls(cls, data: dict[str, Any]) -> dict[str, Any]:
+        # Same as Spec.check_nulls: nulls become floats and fail strict
+        # type validation.
+        for k, v in data.items():
+            if v is None:
+                data[k] = 0.0
+        return data
+
+    @field_validator("name")
+    @classmethod
+    def check_name(cls, v: str) -> str:
+        v = v.strip()
+        if v == "":
+            raise PydanticCustomError("empty", "must not be empty")
+        if len(v) > 100:
+            raise PydanticCustomError("too_long", "too long")
+        return v
+
+    @field_validator("start", "end")
+    @classmethod
+    def check_iso8601(cls, v: str) -> str:
+        try:
+            dt = datetime.fromisoformat(v)
+        except ValueError:
+            dt = None
+        if dt is None or dt.tzinfo is None:
+            raise PydanticCustomError("iso8601_tz", "not a date-time with a time zone")
+        return v
+
+    @field_validator("duration")
+    @classmethod
+    def check_duration(cls, v: int) -> int:
+        if not MIN_MAINTENANCE_DURATION <= v <= MAX_MAINTENANCE_DURATION:
+            raise PydanticCustomError("duration_range", "out of range")
+        return v
+
+    def start_dt(self) -> datetime | None:
+        if self.start is None:
+            return None
+        return datetime.fromisoformat(self.start).astimezone(timezone.utc)
+
+    def end_dt(self) -> datetime | None:
+        if self.end is None:
+            return None
+        return datetime.fromisoformat(self.end).astimezone(timezone.utc)
+
+
 CUSTOM_ERRORS = {
     "too_long": "%s is too long",
     "string_too_long": "%s is too long",
@@ -155,6 +224,18 @@ CUSTOM_ERRORS = {
     "cron_syntax": "%s is not a valid cron or OnCalendar expression",
     "tz_syntax": "%s is not a valid timezone",
     "time_delta_type": "%s is not a number",
+    "missing": "%s is required",
+    "empty": "%s must not be empty",
+    "iso8601_tz": "%s must be an ISO 8601 date-time with a time zone",
+    "duration_range": "%s must be an integer between 60 and 2592000",
+}
+
+
+MAINTENANCE_ERRORS: dict[str, tuple[str, int]] = {
+    "end_before_start": ("end must be after start", 400),
+    "end_in_past": ("end must be in the future", 400),
+    "too_long": ("maintenance window can be at most 30 days long", 400),
+    "limit": ("too many upcoming or active maintenance windows (limit 100)", 403),
 }
 
 
@@ -410,9 +491,19 @@ def _update(check: Check, spec: Spec, v: int) -> None:
         check.channel_set.set(new_channels)
 
 
+def _check_dict(request: ApiRequest, check: Check, readonly: bool = False) -> CheckDict:
+    # A single check is not annotated by flag_checks(), so set_coverage() would
+    # skip it. covering() costs exactly one query.
+    window = MaintenanceWindow.objects.covering(check, now())
+    maintenance = window is not None
+    return check.to_dict(readonly=readonly, v=request.v, maintenance=maintenance)
+
+
 @authorize_read
 def get_checks(request: ApiRequest) -> JsonResponse:
+    at = now()
     q = Check.objects.filter(project=request.project)
+    q = MaintenanceWindow.objects.flag_checks(q, at)
     if not request.readonly:
         # Use QuerySet.only() and Prefetch() to prefetch channel codes only:
         channel_q = Channel.objects.only("code")
@@ -426,11 +517,18 @@ def get_checks(request: ApiRequest) -> JsonResponse:
     if slug := request.GET.get("slug"):
         q = q.filter(slug=slug)
 
+    # precise, final filtering
+    matched = [check for check in q if not tags or check.matches_tag_set(tags)]
+    MaintenanceWindow.objects.set_coverage(matched, at)
+
     checks = []
-    for check in q:
-        # precise, final filtering
-        if not tags or check.matches_tag_set(tags):
-            checks.append(check.to_dict(readonly=request.readonly, v=request.v))
+    for check in matched:
+        maintenance = check.maintenance_window is not None
+        checks.append(
+            check.to_dict(
+                readonly=request.readonly, v=request.v, maintenance=maintenance
+            )
+        )
 
     return JsonResponse({"checks": checks})
 
@@ -456,7 +554,7 @@ def create_check(request: ApiRequest) -> HttpResponse:
     except BadChannelException as e:
         return JsonResponse({"error": e.message}, status=400)
 
-    return JsonResponse(check.to_dict(v=request.v), status=201 if created else 200)
+    return JsonResponse(_check_dict(request, check), status=201 if created else 200)
 
 
 @csrf_exempt
@@ -483,7 +581,7 @@ def get_check(request: ApiRequest, code: UUID) -> HttpResponse:
     if check.project_id != request.project.id:
         return HttpResponseForbidden()
 
-    return JsonResponse(check.to_dict(readonly=request.readonly, v=request.v))
+    return JsonResponse(_check_dict(request, check, readonly=request.readonly))
 
 
 @cors("GET")
@@ -492,7 +590,7 @@ def get_check(request: ApiRequest, code: UUID) -> HttpResponse:
 def get_check_by_unique_key(request: ApiRequest, unique_key: str) -> HttpResponse:
     for check in request.project.check_set.all():
         if check.unique_key == unique_key:
-            return JsonResponse(check.to_dict(readonly=request.readonly, v=request.v))
+            return JsonResponse(_check_dict(request, check, readonly=request.readonly))
     return HttpResponseNotFound()
 
 
@@ -514,7 +612,7 @@ def update_check(request: ApiRequest, code: UUID) -> HttpResponse:
     except Check.NotUpdated:
         return HttpResponseNotFound()
 
-    return JsonResponse(check.to_dict(v=request.v))
+    return JsonResponse(_check_dict(request, check))
 
 
 @authorize
@@ -525,8 +623,10 @@ def delete_check(request: ApiRequest, code: UUID) -> HttpResponse:
     if check.project_id != request.project.id:
         return HttpResponseForbidden()
 
+    # Compute maintenance coverage while the check still exists
+    doc = _check_dict(request, check)
     check.rename_and_delete()
-    return JsonResponse(check.to_dict(v=request.v))
+    return JsonResponse(doc)
 
 
 @csrf_exempt
@@ -551,7 +651,7 @@ def pause(request: ApiRequest, code: UUID) -> HttpResponse:
 
     # Return early, without creating a flip object, if the check is already paused
     if check.status == "paused":
-        return JsonResponse(check.to_dict(v=request.v))
+        return JsonResponse(_check_dict(request, check))
 
     # Track the status change for correct downtime calculation in Check.downtimes()
     check.create_flip("paused", mark_as_processed=True)
@@ -565,7 +665,7 @@ def pause(request: ApiRequest, code: UUID) -> HttpResponse:
     # and Profile.next_nag_date needs to be cleared out:
     check.project.update_next_nag_dates()
 
-    return JsonResponse(check.to_dict(v=request.v))
+    return JsonResponse(_check_dict(request, check))
 
 
 @cors("POST")
@@ -587,7 +687,129 @@ def resume(request: ApiRequest, code: UUID) -> HttpResponse:
     check.alert_after = None
     check.save(update_fields=("status", "last_start", "last_ping", "alert_after"))
 
-    return JsonResponse(check.to_dict(v=request.v))
+    return JsonResponse(_check_dict(request, check))
+
+
+@authorize_read
+def get_maintenance_windows(request: ApiRequest) -> HttpResponse:
+    state = request.GET.get("state")
+    if state not in (None, "active", "upcoming", "ended"):
+        return error("invalid state, expected active, upcoming or ended")
+
+    at = now()
+    MaintenanceWindow.objects.prune(request.project, at)
+    q = MaintenanceWindow.objects.filter(project=request.project)
+    if state == "upcoming":
+        q = q.filter(start__gt=at)
+    elif state == "active":
+        q = q.filter(start__lte=at, end__gt=at)
+    elif state == "ended":
+        q = q.filter(end__lte=at)
+
+    windows = [w.to_dict() for w in q.order_by("-start", "-id")]
+    return JsonResponse({"windows": windows})
+
+
+@authorize
+def create_maintenance_window(request: ApiRequest) -> HttpResponse:
+    try:
+        spec = MaintenanceSpec.model_validate(request.json, strict=True)
+    except ValidationError as e:
+        return JsonResponse({"error": format_first_error(e)}, status=400)
+
+    if (spec.end is None) == (spec.duration is None):
+        return error("json validation error: provide exactly one of end or duration")
+
+    at = now()
+    MaintenanceWindow.objects.prune(request.project, at)
+
+    start = spec.start_dt() or at
+    end = spec.end_dt()
+    if spec.duration is not None:
+        # Duration counts from the start after a past start has moved to now
+        moved_start = start if start > at else at
+        end = moved_start.replace(microsecond=0) + td(seconds=spec.duration)
+    assert end is not None
+
+    try:
+        start, end = MaintenanceWindow.clean_times(start, end, at=at)
+        MaintenanceWindow.objects.assert_can_add(request.project, at)
+    except MaintenanceWindow.Invalid as e:
+        msg, status = MAINTENANCE_ERRORS[e.code]
+        return error(msg, status)
+
+    window = MaintenanceWindow.objects.create(
+        project=request.project,
+        name=spec.name,
+        start=start,
+        end=end,
+        tags=MaintenanceWindow.normalize_tags(spec.tags or ""),
+        created_via="api",
+        created_by=None,
+    )
+    request.project.update_next_nag_dates()
+    return JsonResponse(window.to_dict(), status=201)
+
+
+@csrf_exempt
+@cors("GET", "POST")
+def maintenance(request: HttpRequest) -> HttpResponse:
+    if request.method == "POST":
+        return create_maintenance_window(request)
+
+    return get_maintenance_windows(request)
+
+
+@authorize_read
+def get_maintenance_window(request: ApiRequest, code: UUID) -> HttpResponse:
+    window = get_object_or_404(MaintenanceWindow, code=code)
+    if window.project_id != request.project.id:
+        return HttpResponseForbidden()
+
+    return JsonResponse(window.to_dict())
+
+
+@authorize
+def delete_maintenance_window(request: ApiRequest, code: UUID) -> HttpResponse:
+    window = get_object_or_404(MaintenanceWindow, code=code)
+    if window.project_id != request.project.id:
+        return HttpResponseForbidden()
+
+    if window.state() != "upcoming":
+        return error("only upcoming maintenance windows can be deleted", 409)
+
+    doc = window.to_dict()
+    window.delete()
+    request.project.update_next_nag_dates()
+    return JsonResponse(doc)
+
+
+@csrf_exempt
+@cors("GET", "DELETE")
+def maintenance_single(request: HttpRequest, code: UUID) -> HttpResponse:
+    if request.method == "DELETE":
+        return delete_maintenance_window(request, code)
+
+    return get_maintenance_window(request, code)
+
+
+@cors("POST")
+@csrf_exempt
+@authorize
+def end_maintenance_window(request: ApiRequest, code: UUID) -> HttpResponse:
+    window = get_object_or_404(MaintenanceWindow, code=code)
+    if window.project_id != request.project.id:
+        return HttpResponseForbidden()
+
+    at = now()
+    if window.state(at) != "active":
+        return error("maintenance window is not active", 409)
+
+    # Withheld alerts are released by sendalerts once it sees the window end
+    window.end = at.replace(microsecond=0)
+    window.save(update_fields=["end"])
+    request.project.update_next_nag_dates()
+    return JsonResponse(window.to_dict())
 
 
 @cors("GET")

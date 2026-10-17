@@ -420,6 +420,53 @@ class NotifyWebhookTestCase(BaseTestCase):
         self.assertEqual(body["name"], "Hello World")
 
     @patch("hc.api.transports.curl.request", autospec=True)
+    def test_it_keeps_json_payload_keys(self, mock_post: Mock) -> None:
+        definition = {
+            "method_down": "POST",
+            "url_down": "http://example.org",
+            "body_down": "$JSON",
+            "headers_down": {},
+        }
+
+        self._setup_data(json.dumps(definition))
+        self.channel.notify(self.flip)
+
+        payload = mock_post.call_args.kwargs["data"]
+        body = json.loads(payload)
+        expected = {
+            "uuid",
+            "name",
+            "slug",
+            "tags",
+            "desc",
+            "grace",
+            "n_pings",
+            "status",
+            "started",
+            "last_ping",
+            "next_ping",
+            "manual_resume",
+            "methods",
+            "subject",
+            "subject_fail",
+            "start_kw",
+            "success_kw",
+            "failure_kw",
+            "filter_subject",
+            "filter_body",
+            "filter_http_body",
+            "filter_default_fail",
+            "badge_url",
+            "ping_url",
+            "update_url",
+            "pause_url",
+            "resume_url",
+            "channels",
+            "timeout",
+        }
+        self.assertEqual(set(body.keys()), expected)
+
+    @patch("hc.api.transports.curl.request", autospec=True)
     def test_webhooks_support_body_variable_in_body(self, mock_post: Mock) -> None:
         definition = {
             "method_down": "POST",

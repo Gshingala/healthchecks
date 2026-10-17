@@ -1,0 +1,1692 @@
+openapi: 3.1.0
+info:
+  title: Healthchecks - maintenance windows change contract
+  version: 4.5-dev
+  x-scope: change
+  description: |
+    Contract of the HTTP interface touched by the maintenance-windows change
+    (planning/03-lld.md, ADR-010). The repository has no OpenAPI or Swagger
+    document; the REST API is documented by hand in templates/docs/api.md.
+    This file therefore describes only the routes this change adds or alters,
+    plus the existing check routes that share the changed Check schema.
+
+    Operations marked x-change: added are new. Operations marked
+    x-change: changed exist today and change only as described in their
+    x-change-detail.
+
+    REST API versions. Every /api/v3/ path below is also served, with identical
+    behaviour, under /api/v1/ and /api/v2/ (one view set under three prefixes,
+    ADR-005). Version-specific differences that already exist in check JSON
+    (status "started" in v1, slug generation in v1 and v2) are unchanged.
+
+    CORS. Every /api/ route answers OPTIONS with 204 and any method it does not
+    list with 405 and an empty body (hc/api/decorators.py cors).
+
+    Errors. JSON errors use the single Error schema, {"error": "message"}.
+    Two existing non-JSON responses are kept as they are today. A check or
+    window of another project gives 403 with an empty body, and an unknown UUID
+    gives Django's 404 page.
+
+    Dashboard routes are server-rendered Django views behind session login.
+    Every POST needs the CSRF token (csrfmiddlewaretoken form field or the
+    X-CSRFToken header). Anonymous requests are redirected to the login page.
+servers:
+  - url: '{site_root}'
+    description: The SITE_ROOT of a Healthchecks instance
+    variables:
+      site_root:
+        default: http://localhost:8000
+tags:
+  - name: Maintenance windows
+    description: New REST endpoints (REQ-6)
+  - name: Checks
+    description: Existing REST endpoints whose check JSON gains the maintenance key (REQ-6.15)
+  - name: Dashboard
+    description: Server-rendered pages and form posts (REQ-1, REQ-5)
+
+paths:
+  /api/v3/maintenance/:
+    get:
+      operationId: get_maintenance_windows
+      x-change: added
+      tags: [Maintenance windows]
+      summary: List the project's maintenance windows
+      description: |
+        Returns every window of the API key's project, newest start first, after
+        deleting the project's windows that ended more than 90 days ago
+        (REQ-6.1, REQ-6.2, REQ-5.11). Either the read-write or the read-only key
+        is accepted.
+      security:
+        - ApiKey: []
+      parameters:
+        - name: state
+          in: query
+          required: false
+          description: Return only windows in this state.
+          schema:
+            type: string
+            enum: [active, upcoming, ended]
+          example: active
+      responses:
+        '200':
+          description: The windows of the project.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WindowList'
+              example:
+                windows:
+                  - uuid: 6e2f4c1a-8d5b-4f0e-9a51-2b7c3d4e5f60
+                    name: Postgres upgrade
+                    start: '2026-11-07T20:00:00+00:00'
+                    end: '2026-11-07T21:30:00+00:00'
+                    scope: tags
+                    tags: db prod
+                    state: upcoming
+                    created: '2026-11-01T09:12:44+00:00'
+                    created_via: dashboard
+        '400':
+          description: The state parameter has an unexpected value (MW-A16).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: invalid state, expected active, upcoming or ended
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: create_maintenance_window
+      x-change: added
+      tags: [Maintenance windows]
+      summary: Create a maintenance window
+      description: |
+        Creates a window in the API key's project. Requires the read-write key.
+        The key may be sent in the X-Api-Key header or as api_key in the body.
+        A start at or before now (or no start) becomes now, truncated to the
+        second. Provide exactly one of end and duration; duration counts from
+        the start after that adjustment. Validation stops at the first failing
+        rule, in the order name, start, end, duration, tags, end-or-duration,
+        end after start, end in the future, at most 30 days, at most 100
+        upcoming or active windows (REQ-6.3 to REQ-6.6, REQ-6.18).
+      security:
+        - ApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MaintenanceSpec'
+            examples:
+              duration:
+                summary: Start now for one hour, all checks
+                value:
+                  name: Deploy 42
+                  duration: 3600
+              scheduled:
+                summary: Scheduled, checks tagged db and prod
+                value:
+                  name: Postgres upgrade
+                  start: '2026-11-07T22:00:00+02:00'
+                  end: '2026-11-07T23:30:00+02:00'
+                  tags: db prod
+      responses:
+        '201':
+          description: The window was created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Window'
+              example:
+                uuid: 0b6e1f7a-3c2d-4e5f-8a9b-1c2d3e4f5a6b
+                name: Deploy 42
+                start: '2026-11-07T20:00:00+00:00'
+                end: '2026-11-07T21:00:00+00:00'
+                scope: all
+                tags: ''
+                state: active
+                created: '2026-11-07T20:00:00+00:00'
+                created_via: api
+        '400':
+          description: |
+            The body could not be parsed, is not a JSON object, or breaks a
+            validation rule (MW-A01 to MW-A14).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                missing_name:
+                  value:
+                    error: 'json validation error: name is required'
+                exactly_one:
+                  value:
+                    error: 'json validation error: provide exactly one of end or duration'
+                duration_range:
+                  value:
+                    error: 'json validation error: duration must be an integer between 60 and 2592000'
+                start_format:
+                  value:
+                    error: 'json validation error: start must be an ISO 8601 date-time with a time zone'
+                end_before_start:
+                  value:
+                    error: end must be after start
+                end_in_past:
+                  value:
+                    error: end must be in the future
+                too_long:
+                  value:
+                    error: maintenance window can be at most 30 days long
+                not_parsed:
+                  value:
+                    error: could not parse request body
+                not_object:
+                  value:
+                    error: 'json validation error: value is not an object'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: The project already has 100 upcoming or active windows (MW-A15).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: too many upcoming or active maintenance windows (limit 100)
+
+  /api/v3/maintenance/{uuid}:
+    parameters:
+      - $ref: '#/components/parameters/WindowUuid'
+    get:
+      operationId: get_maintenance_window
+      x-change: added
+      tags: [Maintenance windows]
+      summary: Get a single maintenance window
+      description: Either the read-write or the read-only key is accepted (REQ-6.7).
+      security:
+        - ApiKey: []
+      responses:
+        '200':
+          description: The window.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Window'
+              example:
+                uuid: 6e2f4c1a-8d5b-4f0e-9a51-2b7c3d4e5f60
+                name: Postgres upgrade
+                start: '2026-11-07T20:00:00+00:00'
+                end: '2026-11-07T21:30:00+00:00'
+                scope: tags
+                tags: db prod
+                state: active
+                created: '2026-11-01T09:12:44+00:00'
+                created_via: dashboard
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenEmpty'
+        '404':
+          $ref: '#/components/responses/NotFoundPage'
+    delete:
+      operationId: delete_maintenance_window
+      x-change: added
+      tags: [Maintenance windows]
+      summary: Delete an upcoming maintenance window
+      description: |
+        Requires the read-write key. Only upcoming windows can be deleted. The
+        response holds the window as it was before deletion (REQ-6.10, REQ-6.11).
+      security:
+        - ApiKey: []
+      responses:
+        '200':
+          description: The window was deleted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Window'
+              example:
+                uuid: 6e2f4c1a-8d5b-4f0e-9a51-2b7c3d4e5f60
+                name: Postgres upgrade
+                start: '2026-11-07T20:00:00+00:00'
+                end: '2026-11-07T21:30:00+00:00'
+                scope: tags
+                tags: db prod
+                state: upcoming
+                created: '2026-11-01T09:12:44+00:00'
+                created_via: dashboard
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenEmpty'
+        '404':
+          $ref: '#/components/responses/NotFoundPage'
+        '409':
+          description: The window is active or ended (MW-A18).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: only upcoming maintenance windows can be deleted
+
+  /api/v3/maintenance/{uuid}/end:
+    parameters:
+      - $ref: '#/components/parameters/WindowUuid'
+    post:
+      operationId: end_maintenance_window
+      x-change: added
+      tags: [Maintenance windows]
+      summary: End an active maintenance window now
+      description: |
+        Requires the read-write key. Sets end to the current instant, truncated
+        to the second. Alerts withheld for checks that are still down go out
+        within 60 seconds through the sendalerts end-of-window pass
+        (REQ-6.8, REQ-6.9, REQ-3.4).
+      security:
+        - ApiKey: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EndRequest'
+            example:
+              api_key: your-read-write-api-key-32chars
+      responses:
+        '200':
+          description: The window was ended.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Window'
+              example:
+                uuid: 6e2f4c1a-8d5b-4f0e-9a51-2b7c3d4e5f60
+                name: Postgres upgrade
+                start: '2026-11-07T20:00:00+00:00'
+                end: '2026-11-07T20:41:07+00:00'
+                scope: tags
+                tags: db prod
+                state: ended
+                created: '2026-11-01T09:12:44+00:00'
+                created_via: dashboard
+        '400':
+          description: The body could not be parsed or is not a JSON object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: could not parse request body
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenEmpty'
+        '404':
+          $ref: '#/components/responses/NotFoundPage'
+        '409':
+          description: The window is upcoming or already ended (MW-A17).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: maintenance window is not active
+
+  /api/v3/checks/:
+    get:
+      operationId: get_checks
+      x-change: changed
+      x-change-detail: Each check object gains the maintenance boolean. Filters, query count with no active window, and all other keys are unchanged.
+      tags: [Checks]
+      summary: List existing checks
+      security:
+        - ApiKey: []
+      parameters:
+        - name: tag
+          in: query
+          required: false
+          description: Return only checks that have this tag. May be repeated.
+          schema:
+            type: string
+          example: prod
+        - name: slug
+          in: query
+          required: false
+          description: Return only checks with this slug.
+          schema:
+            type: string
+          example: backups
+      responses:
+        '200':
+          description: The checks of the project.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckList'
+              example:
+                checks:
+                  - name: Database Backup
+                    slug: database-backup
+                    tags: production db
+                    desc: Runs ~/db-backup.sh
+                    grace: 1200
+                    n_pings: 7
+                    status: down
+                    started: false
+                    last_ping: '2020-03-23T10:19:32+00:00'
+                    next_ping: null
+                    manual_resume: false
+                    methods: ''
+                    subject: ''
+                    subject_fail: ''
+                    start_kw: ''
+                    success_kw: ''
+                    failure_kw: ''
+                    filter_subject: false
+                    filter_body: false
+                    filter_http_body: false
+                    filter_default_fail: false
+                    badge_url: http://localhost:8000/b/2/1b9d0386-d07e-44b0-8995-4a9a372de43c.svg
+                    uuid: 803f680d-e89b-492b-82ef-2be7b774a92d
+                    ping_url: http://localhost:8000/ping/803f680d-e89b-492b-82ef-2be7b774a92d
+                    update_url: http://localhost:8000/api/v3/checks/803f680d-e89b-492b-82ef-2be7b774a92d
+                    pause_url: http://localhost:8000/api/v3/checks/803f680d-e89b-492b-82ef-2be7b774a92d/pause
+                    resume_url: http://localhost:8000/api/v3/checks/803f680d-e89b-492b-82ef-2be7b774a92d/resume
+                    channels: ''
+                    timeout: 86400
+                    maintenance: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: create_check
+      x-change: changed
+      x-change-detail: The response check object gains the maintenance boolean. Request and status codes are unchanged.
+      tags: [Checks]
+      summary: Create a check, or update the one matched by unique
+      security:
+        - ApiKey: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckSpec'
+            example:
+              name: Backups
+              tags: prod www
+              timeout: 3600
+              grace: 60
+      responses:
+        '200':
+          description: An existing check matched by unique was updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Check'
+              examples:
+                existing:
+                  $ref: '#/components/examples/CheckExample'
+        '201':
+          description: The check was created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Check'
+              examples:
+                created:
+                  $ref: '#/components/examples/CheckExample'
+        '400':
+          description: The body breaks a validation rule (unchanged messages).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: 'json validation error: timeout is too small'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenEmpty'
+
+  /api/v3/checks/{uuid}:
+    parameters:
+      - $ref: '#/components/parameters/CheckUuid'
+    get:
+      operationId: get_check
+      x-change: changed
+      x-change-detail: The check object gains the maintenance boolean (one extra query).
+      x-also-served-by: GET /api/v3/checks/{unique_key} (operation get_check_by_unique_key, 40-character read-only key form) returns the same Check schema, also with the maintenance key; an unknown unique_key gives 404 with an empty body.
+      tags: [Checks]
+      summary: Get a single check
+      security:
+        - ApiKey: []
+      responses:
+        '200':
+          description: The check.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Check'
+              examples:
+                check:
+                  $ref: '#/components/examples/CheckExample'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenEmpty'
+        '404':
+          $ref: '#/components/responses/NotFoundPage'
+    post:
+      operationId: update_check
+      x-change: changed
+      x-change-detail: The response check object gains the maintenance boolean.
+      tags: [Checks]
+      summary: Update an existing check
+      security:
+        - ApiKey: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckSpec'
+            example:
+              tags: prod www db
+      responses:
+        '200':
+          description: The check was updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Check'
+              examples:
+                check:
+                  $ref: '#/components/examples/CheckExample'
+        '400':
+          description: The body breaks a validation rule (unchanged messages).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: 'json validation error: tags is too long'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenEmpty'
+        '404':
+          $ref: '#/components/responses/NotFoundPage'
+    delete:
+      operationId: delete_check
+      x-change: changed
+      x-change-detail: The response check object gains the maintenance boolean, computed before deletion.
+      tags: [Checks]
+      summary: Delete a check
+      security:
+        - ApiKey: []
+      responses:
+        '200':
+          description: The check was deleted. The body is the check as it was.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Check'
+              examples:
+                check:
+                  $ref: '#/components/examples/CheckExample'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenEmpty'
+        '404':
+          $ref: '#/components/responses/NotFoundPage'
+
+  /api/v3/checks/{uuid}/pause:
+    parameters:
+      - $ref: '#/components/parameters/CheckUuid'
+    post:
+      operationId: pause
+      x-change: changed
+      x-change-detail: The response check object gains the maintenance boolean. Pausing is otherwise unchanged and never evaluated by maintenance windows.
+      tags: [Checks]
+      summary: Pause monitoring of a check
+      security:
+        - ApiKey: []
+      responses:
+        '200':
+          description: The check is paused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Check'
+              examples:
+                check:
+                  $ref: '#/components/examples/CheckExample'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenEmpty'
+        '404':
+          $ref: '#/components/responses/NotFoundPage'
+
+  /api/v3/checks/{uuid}/resume:
+    parameters:
+      - $ref: '#/components/parameters/CheckUuid'
+    post:
+      operationId: resume
+      x-change: changed
+      x-change-detail: The response check object gains the maintenance boolean. The existing plain-text 409 is unchanged.
+      tags: [Checks]
+      summary: Resume monitoring of a paused check
+      security:
+        - ApiKey: []
+      responses:
+        '200':
+          description: The check is resumed and in the new state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Check'
+              examples:
+                check:
+                  $ref: '#/components/examples/CheckExample'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenEmpty'
+        '404':
+          $ref: '#/components/responses/NotFoundPage'
+        '409':
+          description: The check is not paused. Existing plain-text body.
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: check is not paused
+
+  /projects/{code}/maintenance/:
+    parameters:
+      - $ref: '#/components/parameters/ProjectCode'
+    get:
+      operationId: maintenance
+      x-change: added
+      tags: [Dashboard]
+      summary: Maintenance page of a project
+      description: |
+        Renders front/maintenance.html with the sections Active, Upcoming and
+        Ended in the last 90 days, after pruning older windows (REQ-5.4 to
+        REQ-5.6, REQ-5.11). Any member may view it; write controls are rendered
+        only for writers (REQ-1.15).
+      security:
+        - Session: []
+      responses:
+        '200':
+          description: The Maintenance page (front/maintenance.html).
+          content:
+            text/html:
+              schema:
+                type: string
+              example: |
+                <h1>Maintenance</h1>
+                <section id="maintenance-active"><h2>Active</h2></section>
+                <section id="maintenance-upcoming"><h2>Upcoming</h2></section>
+                <section id="maintenance-ended"><h2>Ended in the last 90 days</h2></section>
+        '302':
+          $ref: '#/components/responses/LoginRedirect'
+        '404':
+          $ref: '#/components/responses/DashboardNotFound'
+
+  /projects/{code}/maintenance/add/:
+    parameters:
+      - $ref: '#/components/parameters/ProjectCode'
+    post:
+      operationId: add_maintenance
+      x-change: added
+      tags: [Dashboard]
+      summary: Schedule a window or start one now
+      description: |
+        Writers only. When duration_minutes is present the StartNowForm fields
+        are used, otherwise the MaintenanceWindowForm fields. Dates and times
+        are local to the user's Profile.tz (REQ-1.2 to REQ-1.7, REQ-1.18 to
+        REQ-1.20).
+      security:
+        - Session: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/MaintenanceWindowForm'
+                - $ref: '#/components/schemas/StartNowForm'
+            examples:
+              scheduled:
+                summary: Scheduled window for all checks
+                value:
+                  csrfmiddlewaretoken: token-from-the-page
+                  name: Postgres upgrade
+                  start_date: '2026-11-07'
+                  start_time: '22:00'
+                  end_date: '2026-11-07'
+                  end_time: '23:30'
+                  scope: all
+                  tags: ''
+              start_now:
+                summary: Start now for one hour, checks tagged db
+                value:
+                  csrfmiddlewaretoken: token-from-the-page
+                  name: 'Maintenance: Database Backup'
+                  duration_minutes: 60
+                  scope: tags
+                  tags: db
+      responses:
+        '200':
+          description: |
+            Validation failed. The Maintenance page (front/maintenance.html) is
+            rendered again with the form, its errors and the entered values, and
+            the form's modal reopened (MW-D01 to MW-D08, MW-D15).
+          content:
+            text/html:
+              schema:
+                type: string
+              example: |
+                <div class="modal" id="maintenance-form-modal" data-open-modal="add">
+                  <span class="help-block" id="end-error">End must be after start.</span>
+                </div>
+        '302':
+          description: |
+            The window was created; redirect to the Maintenance page. Anonymous
+            requests are redirected to the login page instead.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '403':
+          $ref: '#/components/responses/DashboardForbidden'
+        '404':
+          $ref: '#/components/responses/DashboardNotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /projects/{code}/maintenance/preview/:
+    parameters:
+      - $ref: '#/components/parameters/ProjectCode'
+    get:
+      operationId: maintenance_preview
+      x-change: added
+      tags: [Dashboard]
+      summary: Checks a scope would cover right now
+      description: |
+        Used by static/js/maintenance.js (REQ-5.7, REQ-5.8). The result is
+        inserted into the page as text only. Any member may call it.
+      security:
+        - Session: []
+      parameters:
+        - name: scope
+          in: query
+          required: false
+          description: Absent means all.
+          schema:
+            type: string
+            enum: [all, tags]
+          example: tags
+        - name: tags
+          in: query
+          required: false
+          description: Space-separated tags; used when scope is tags.
+          schema:
+            type: string
+            maxLength: 500
+          example: db prod
+      responses:
+        '200':
+          description: The number of matching checks and up to 20 of them.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreviewResult'
+              example:
+                count: 2
+                checks:
+                  - name: Database Backup
+                    url: /checks/803f680d-e89b-492b-82ef-2be7b774a92d/details/
+                  - name: Replica lag
+                    url: /checks/2f1a3b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b/details/
+        '302':
+          $ref: '#/components/responses/LoginRedirect'
+        '400':
+          description: tags is longer than 500 characters (MW-D13) or scope is not allowed (MW-D14).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                tags_too_long:
+                  value:
+                    error: tags is too long
+                invalid_scope:
+                  value:
+                    error: invalid scope
+        '404':
+          $ref: '#/components/responses/DashboardNotFound'
+
+  /projects/{code}/maintenance/{mw_code}/edit/:
+    parameters:
+      - $ref: '#/components/parameters/ProjectCode'
+      - $ref: '#/components/parameters/WindowCode'
+    post:
+      operationId: edit_maintenance
+      x-change: added
+      tags: [Dashboard]
+      summary: Edit a window
+      description: |
+        Writers only. Upcoming windows may change name, start, end and scope.
+        Active windows may change name and end only. Ended windows cannot change
+        (REQ-1.8 to REQ-1.10, REQ-1.14).
+      security:
+        - Session: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/MaintenanceWindowForm'
+            example:
+              csrfmiddlewaretoken: token-from-the-page
+              name: Postgres upgrade
+              start_date: '2026-11-07'
+              start_time: '22:00'
+              end_date: '2026-11-08'
+              end_time: '00:30'
+              scope: tags
+              tags: db prod
+      responses:
+        '200':
+          description: |
+            Validation failed. The Maintenance page (front/maintenance.html) is
+            rendered with the edit form and its errors (MW-D01 to MW-D07, MW-D09).
+          content:
+            text/html:
+              schema:
+                type: string
+              example: |
+                <div class="alert alert-danger">This window has already started. Only its name and end time can be changed.</div>
+        '302':
+          description: The window was updated; redirect to the Maintenance page (or to login for anonymous requests).
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '400':
+          description: The window has ended (MW-D10). Renders front/maintenance.html with the message.
+          content:
+            text/html:
+              schema:
+                type: string
+              example: |
+                <div class="alert alert-danger">This maintenance window has ended and can no longer be changed.</div>
+        '403':
+          $ref: '#/components/responses/DashboardForbidden'
+        '404':
+          $ref: '#/components/responses/DashboardNotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /projects/{code}/maintenance/{mw_code}/end/:
+    parameters:
+      - $ref: '#/components/parameters/ProjectCode'
+      - $ref: '#/components/parameters/WindowCode'
+    post:
+      operationId: end_maintenance
+      x-change: added
+      tags: [Dashboard]
+      summary: End an active window now
+      description: Writers only (REQ-1.11, REQ-1.14, REQ-3.4).
+      security:
+        - Session: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CsrfOnlyForm'
+            example:
+              csrfmiddlewaretoken: token-from-the-page
+      responses:
+        '302':
+          description: The window was ended; redirect to the Maintenance page (or to login for anonymous requests).
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '400':
+          description: The window is ended (MW-D10) or upcoming (MW-D12). Renders front/maintenance.html with the message.
+          content:
+            text/html:
+              schema:
+                type: string
+              example: |
+                <div class="alert alert-danger">This maintenance window has not started yet. Delete it instead.</div>
+        '403':
+          $ref: '#/components/responses/DashboardForbidden'
+        '404':
+          $ref: '#/components/responses/DashboardNotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /projects/{code}/maintenance/{mw_code}/remove/:
+    parameters:
+      - $ref: '#/components/parameters/ProjectCode'
+      - $ref: '#/components/parameters/WindowCode'
+    post:
+      operationId: remove_maintenance
+      x-change: added
+      tags: [Dashboard]
+      summary: Delete an upcoming window
+      description: Writers only (REQ-1.12, REQ-1.13).
+      security:
+        - Session: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CsrfOnlyForm'
+            example:
+              csrfmiddlewaretoken: token-from-the-page
+      responses:
+        '302':
+          description: |
+            The window was deleted; redirect to the Maintenance page, which shows
+            "Maintenance window deleted." (or to login for anonymous requests).
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '400':
+          description: The window is active or ended (MW-D11). Renders front/maintenance.html with the message.
+          content:
+            text/html:
+              schema:
+                type: string
+              example: |
+                <div class="alert alert-danger">Only upcoming maintenance windows can be deleted. Use End now to stop an active window.</div>
+        '403':
+          $ref: '#/components/responses/DashboardForbidden'
+        '404':
+          $ref: '#/components/responses/DashboardNotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /projects/{code}/checks/:
+    parameters:
+      - $ref: '#/components/parameters/ProjectCode'
+    get:
+      operationId: checks
+      x-change: changed
+      x-change-detail: Rows of checks covered now show the Maintenance label (REQ-5.3). Query parameters and everything else are unchanged.
+      tags: [Dashboard]
+      summary: Checks page of a project
+      security:
+        - Session: []
+      responses:
+        '200':
+          description: The checks page (front/checks.html).
+          content:
+            text/html:
+              schema:
+                type: string
+              example: |
+                <span class="label label-maintenance" title="Under maintenance until Nov 7, 23:30 Europe/Riga (Postgres upgrade)">Maintenance</span>
+        '302':
+          $ref: '#/components/responses/LoginRedirect'
+        '404':
+          $ref: '#/components/responses/DashboardNotFound'
+
+  /checks/{code}/details/:
+    parameters:
+      - $ref: '#/components/parameters/CheckCode'
+    get:
+      operationId: details
+      x-change: changed
+      x-change-detail: Shows the Maintenance label when covered now (REQ-5.3) and, for writers, a Start maintenance control posting to add_maintenance (REQ-1.7).
+      tags: [Dashboard]
+      summary: Details page of a check
+      security:
+        - Session: []
+      responses:
+        '200':
+          description: The details page (front/details.html).
+          content:
+            text/html:
+              schema:
+                type: string
+              example: |
+                <button data-target="#start-maintenance-modal" data-toggle="modal">Start maintenance</button>
+        '302':
+          $ref: '#/components/responses/LoginRedirect'
+        '404':
+          $ref: '#/components/responses/DashboardNotFound'
+
+  /checks/{code}/log/:
+    parameters:
+      - $ref: '#/components/parameters/CheckCode'
+    get:
+      operationId: log
+      x-change: changed
+      x-change-detail: Flip rows of withheld flips show the withheld text (REQ-5.1, REQ-5.2).
+      tags: [Dashboard]
+      summary: Event log page of a check
+      security:
+        - Session: []
+      responses:
+        '200':
+          description: The log page (front/log.html).
+          content:
+            text/html:
+              schema:
+                type: string
+              example: |
+                <span class="withheld">Alert not sent: maintenance window "Postgres upgrade"</span>
+        '302':
+          $ref: '#/components/responses/LoginRedirect'
+        '404':
+          $ref: '#/components/responses/DashboardNotFound'
+
+  /checks/{code}/log_events/:
+    parameters:
+      - $ref: '#/components/parameters/CheckCode'
+    get:
+      operationId: log_events
+      x-change: changed
+      x-change-detail: Flip rows of withheld flips show the withheld text. Query parameters u, end and the kind filters are unchanged.
+      tags: [Dashboard]
+      summary: Event rows for live updates and filters
+      security:
+        - Session: []
+      responses:
+        '200':
+          description: Rows rendered with front/log_rows.html.
+          content:
+            text/html:
+              schema:
+                type: string
+              example: |
+                <tr class="flip"><td colspan="2">Status: <strong>up ➔ down</strong>. <span class="withheld">Alert not sent: maintenance window</span></td></tr>
+        '400':
+          description: Invalid filter values (unchanged, empty body).
+        '403':
+          description: Not logged in (unchanged, empty body).
+        '404':
+          $ref: '#/components/responses/DashboardNotFound'
+
+  /checks/{code}/status/:
+    parameters:
+      - $ref: '#/components/parameters/CheckCode'
+    get:
+      operationId: status_single
+      x-change: changed
+      x-change-detail: The events HTML inside the JSON shows the withheld text. JSON keys are unchanged.
+      tags: [Dashboard]
+      summary: Live status of a check for the details page
+      security:
+        - Session: []
+      responses:
+        '200':
+          description: JSON with HTML fragments, keys unchanged.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  status_text:
+                    type: string
+                  title:
+                    type: string
+                  updated:
+                    type: string
+                  started:
+                    type: boolean
+                  events:
+                    type: string
+                  downtimes:
+                    type: string
+                required: [status, status_text, title, updated, started]
+              example:
+                status: down
+                status_text: This check is down.
+                title: DOWN
+                updated: '1793000000.123456'
+                started: false
+                events: '<table id="log"><tr class="flip"><td colspan="2"><span class="withheld">Alert not sent: maintenance window "Postgres upgrade"</span></td></tr></table>'
+                downtimes: '<table></table>'
+        '403':
+          description: Not logged in (unchanged, empty body).
+        '404':
+          $ref: '#/components/responses/DashboardNotFound'
+
+components:
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: |
+        Project API key, 32 characters. Read operations accept the read-write
+        or the read-only key (authorize_read). Write operations need the
+        read-write key (authorize); a read-only key gives 401 wrong api key.
+        On POST the key may instead be sent as api_key in the JSON body.
+    Session:
+      type: apiKey
+      in: cookie
+      name: sessionid
+      description: Django session cookie of a logged-in user. POST also needs the CSRF token.
+
+  parameters:
+    WindowUuid:
+      name: uuid
+      in: path
+      required: true
+      description: The window's uuid (MaintenanceWindow.code).
+      schema:
+        type: string
+        format: uuid
+      example: 6e2f4c1a-8d5b-4f0e-9a51-2b7c3d4e5f60
+    CheckUuid:
+      name: uuid
+      in: path
+      required: true
+      description: The check's uuid.
+      schema:
+        type: string
+        format: uuid
+      example: 803f680d-e89b-492b-82ef-2be7b774a92d
+    ProjectCode:
+      name: code
+      in: path
+      required: true
+      description: The project's code.
+      schema:
+        type: string
+        format: uuid
+      example: 9c1e2d3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f
+    WindowCode:
+      name: mw_code
+      in: path
+      required: true
+      description: The window's code. It must belong to the project in the path, otherwise 404.
+      schema:
+        type: string
+        format: uuid
+      example: 6e2f4c1a-8d5b-4f0e-9a51-2b7c3d4e5f60
+    CheckCode:
+      name: code
+      in: path
+      required: true
+      description: The check's code.
+      schema:
+        type: string
+        format: uuid
+      example: 803f680d-e89b-492b-82ef-2be7b774a92d
+
+  headers:
+    Location:
+      description: Redirect target.
+      schema:
+        type: string
+      example: /projects/9c1e2d3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f/maintenance/
+
+  responses:
+    Unauthorized:
+      description: |
+        The key is missing or not 32 characters (missing api key), matches no
+        project, or is a read-only key on a write (wrong api key).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            missing:
+              value:
+                error: missing api key
+            wrong:
+              value:
+                error: wrong api key
+    ForbiddenEmpty:
+      description: The object belongs to another project. Existing HttpResponseForbidden with an empty body.
+    NotFoundPage:
+      description: No object with this UUID. Django's 404 page from get_object_or_404.
+      content:
+        text/html:
+          schema:
+            type: string
+          example: |
+            <h1>Not Found</h1><p>The requested resource was not found on this server.</p>
+    MethodNotAllowed:
+      description: Only POST is allowed (require_POST). Empty body.
+    LoginRedirect:
+      description: Not logged in; redirect to the login page.
+      headers:
+        Location:
+          schema:
+            type: string
+          example: /accounts/login/?next=/projects/9c1e2d3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f/maintenance/
+    DashboardForbidden:
+      description: The user is a read-only member of the project (PermissionDenied). Django's 403 page.
+      content:
+        text/html:
+          schema:
+            type: string
+          example: |
+            <h1>403 Forbidden</h1>
+    DashboardNotFound:
+      description: |
+        The user is not a member of the project, or the project, check or window
+        does not exist, or the window belongs to another project. Django's 404
+        page, with no window data.
+      content:
+        text/html:
+          schema:
+            type: string
+          example: |
+            <h1>Not Found</h1>
+
+  examples:
+    CheckExample:
+      summary: A check with the maintenance key
+      value:
+        name: Backups
+        slug: backups
+        tags: prod www
+        desc: ''
+        grace: 60
+        n_pings: 0
+        status: new
+        started: false
+        last_ping: null
+        next_ping: null
+        manual_resume: false
+        methods: ''
+        subject: ''
+        subject_fail: ''
+        start_kw: ''
+        success_kw: ''
+        failure_kw: ''
+        filter_subject: false
+        filter_body: false
+        filter_http_body: false
+        filter_default_fail: false
+        badge_url: http://localhost:8000/b/2/d43c84db-1502-4d86-a89d-181a33e25896.svg
+        uuid: 7918b17b-a745-4db1-8575-9d2e07c97f79
+        ping_url: http://localhost:8000/ping/7918b17b-a745-4db1-8575-9d2e07c97f79
+        update_url: http://localhost:8000/api/v3/checks/7918b17b-a745-4db1-8575-9d2e07c97f79
+        pause_url: http://localhost:8000/api/v3/checks/7918b17b-a745-4db1-8575-9d2e07c97f79/pause
+        resume_url: http://localhost:8000/api/v3/checks/7918b17b-a745-4db1-8575-9d2e07c97f79/resume
+        channels: ''
+        timeout: 3600
+        maintenance: false
+
+  schemas:
+    Error:
+      type: object
+      description: The one JSON error body (hc/api/decorators.py error).
+      properties:
+        error:
+          type: string
+      required: [error]
+      example:
+        error: wrong api key
+
+    Window:
+      type: object
+      x-change: added
+      description: |
+        MaintenanceWindow.to_dict(). Times are UTC with seconds precision and a
+        +00:00 offset. state is computed when the response is built. There is
+        no creator field (REQ-6.14).
+      properties:
+        uuid:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        start:
+          type: string
+          format: date-time
+          description: Inclusive.
+        end:
+          type: string
+          format: date-time
+          description: Exclusive.
+        scope:
+          type: string
+          enum: [all, tags]
+          description: all when tags is empty, otherwise tags.
+        tags:
+          type: string
+          maxLength: 500
+          description: Normalised space-separated tags; empty for all checks.
+        state:
+          type: string
+          enum: [upcoming, active, ended]
+        created:
+          type: string
+          format: date-time
+        created_via:
+          type: string
+          enum: [dashboard, api]
+      required: [uuid, name, start, end, scope, tags, state, created, created_via]
+      additionalProperties: false
+      example:
+        uuid: 6e2f4c1a-8d5b-4f0e-9a51-2b7c3d4e5f60
+        name: Postgres upgrade
+        start: '2026-11-07T20:00:00+00:00'
+        end: '2026-11-07T21:30:00+00:00'
+        scope: tags
+        tags: db prod
+        state: upcoming
+        created: '2026-11-01T09:12:44+00:00'
+        created_via: dashboard
+
+    WindowList:
+      type: object
+      x-change: added
+      properties:
+        windows:
+          type: array
+          items:
+            $ref: '#/components/schemas/Window'
+      required: [windows]
+      example:
+        windows: []
+
+    MaintenanceSpec:
+      type: object
+      x-change: added
+      description: |
+        Body of create_maintenance_window, validated with Pydantic strict mode.
+        Exactly one of end and duration is required. Unknown keys, including
+        api_key, are ignored by validation. null is rejected for every field.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Trimmed before the length check.
+        start:
+          type: string
+          format: date-time
+          description: ISO 8601 with a UTC offset or Z. Absent, or at or before now, means now.
+        end:
+          type: string
+          format: date-time
+          description: ISO 8601 with a UTC offset or Z. Must be after start, in the future, and at most 30 days after start.
+        duration:
+          type: integer
+          minimum: 60
+          maximum: 2592000
+          description: Seconds from the start. A string such as "3600" is rejected.
+        tags:
+          type: string
+          maxLength: 500
+          description: Space-separated; absent or empty means all checks.
+        api_key:
+          type: string
+          minLength: 32
+          maxLength: 32
+          description: Alternative to the X-Api-Key header.
+      required: [name]
+      example:
+        name: Deploy 42
+        duration: 3600
+
+    EndRequest:
+      type: object
+      x-change: added
+      description: Optional body of end_maintenance_window; only api_key is read.
+      properties:
+        api_key:
+          type: string
+          minLength: 32
+          maxLength: 32
+      example:
+        api_key: your-read-write-api-key-32chars
+
+    Check:
+      type: object
+      x-change: changed
+      description: |
+        Check.to_dict() as returned by the check endpoints. Only the maintenance
+        property is new. uuid, ping_url, update_url, pause_url, resume_url and
+        channels are present for read-write keys; unique_key replaces them for
+        read-only keys. timeout is present for simple checks, schedule and tz for
+        cron and OnCalendar checks. last_duration is present when known.
+      properties:
+        name:
+          type: string
+        slug:
+          type: string
+        tags:
+          type: string
+        desc:
+          type: string
+        grace:
+          type: integer
+        n_pings:
+          type: integer
+        status:
+          type: string
+          enum: [new, up, grace, down, paused, started]
+        started:
+          type: boolean
+        last_ping:
+          type: [string, 'null']
+          format: date-time
+        next_ping:
+          type: [string, 'null']
+          format: date-time
+        manual_resume:
+          type: boolean
+        methods:
+          type: string
+          enum: ['', POST]
+        subject:
+          type: string
+        subject_fail:
+          type: string
+        start_kw:
+          type: string
+        success_kw:
+          type: string
+        failure_kw:
+          type: string
+        filter_subject:
+          type: boolean
+        filter_body:
+          type: boolean
+        filter_http_body:
+          type: boolean
+        filter_default_fail:
+          type: boolean
+        badge_url:
+          type: string
+          format: uri
+        last_duration:
+          type: integer
+        unique_key:
+          type: string
+        uuid:
+          type: string
+          format: uuid
+        ping_url:
+          type: string
+          format: uri
+        update_url:
+          type: string
+          format: uri
+        pause_url:
+          type: string
+          format: uri
+        resume_url:
+          type: string
+          format: uri
+        channels:
+          type: string
+        timeout:
+          type: integer
+        schedule:
+          type: string
+        tz:
+          type: string
+        maintenance:
+          type: boolean
+          x-change: added
+          description: True when at least one maintenance window covers the check now (REQ-6.15).
+      required:
+        - name
+        - slug
+        - tags
+        - desc
+        - grace
+        - n_pings
+        - status
+        - started
+        - last_ping
+        - next_ping
+        - manual_resume
+        - methods
+        - subject
+        - subject_fail
+        - start_kw
+        - success_kw
+        - failure_kw
+        - filter_subject
+        - filter_body
+        - filter_http_body
+        - filter_default_fail
+        - badge_url
+        - maintenance
+      example:
+        name: Backups
+        slug: backups
+        tags: prod www
+        desc: ''
+        grace: 60
+        n_pings: 0
+        status: new
+        started: false
+        last_ping: null
+        next_ping: null
+        manual_resume: false
+        methods: ''
+        subject: ''
+        subject_fail: ''
+        start_kw: ''
+        success_kw: ''
+        failure_kw: ''
+        filter_subject: false
+        filter_body: false
+        filter_http_body: false
+        filter_default_fail: false
+        badge_url: http://localhost:8000/b/2/d43c84db-1502-4d86-a89d-181a33e25896.svg
+        timeout: 3600
+        maintenance: false
+
+    CheckList:
+      type: object
+      x-change: changed
+      properties:
+        checks:
+          type: array
+          items:
+            $ref: '#/components/schemas/Check'
+      required: [checks]
+      example:
+        checks: []
+
+    CheckSpec:
+      type: object
+      description: |
+        Existing request body of create_check and update_check (hc/api/views.py
+        Spec), unchanged by this change. Validated with Pydantic strict mode.
+      properties:
+        api_key:
+          type: string
+        channels:
+          type: string
+        desc:
+          type: string
+          maxLength: 10000
+        failure_kw:
+          type: string
+          maxLength: 200
+        filter_subject:
+          type: boolean
+        filter_body:
+          type: boolean
+        filter_http_body:
+          type: boolean
+        filter_default_fail:
+          type: boolean
+        grace:
+          type: integer
+          minimum: 60
+          maximum: 31536000
+        manual_resume:
+          type: boolean
+        methods:
+          type: string
+          enum: ['', POST]
+        name:
+          type: string
+          maxLength: 100
+        schedule:
+          type: string
+          maxLength: 100
+        slug:
+          type: string
+          maxLength: 100
+          pattern: '^[a-z0-9-_]*$'
+        start_kw:
+          type: string
+          maxLength: 200
+        subject:
+          type: string
+          maxLength: 200
+        subject_fail:
+          type: string
+          maxLength: 200
+        success_kw:
+          type: string
+          maxLength: 200
+        tags:
+          type: string
+          maxLength: 500
+        timeout:
+          type: integer
+          minimum: 60
+          maximum: 31536000
+        tz:
+          type: string
+        unique:
+          type: array
+          items:
+            type: string
+            enum: [name, slug, tags, timeout, grace]
+      example:
+        name: Backups
+        tags: prod www
+        timeout: 3600
+
+    PreviewResult:
+      type: object
+      x-change: added
+      properties:
+        count:
+          type: integer
+          minimum: 0
+        checks:
+          type: array
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/PreviewCheck'
+      required: [count, checks]
+      example:
+        count: 0
+        checks: []
+
+    PreviewCheck:
+      type: object
+      x-change: added
+      properties:
+        name:
+          type: string
+          description: Check name, or its code when the name is empty.
+        url:
+          type: string
+          description: Path of the check's details page.
+      required: [name, url]
+      example:
+        name: Database Backup
+        url: /checks/803f680d-e89b-492b-82ef-2be7b774a92d/details/
+
+    MaintenanceWindowForm:
+      type: object
+      x-change: added
+      description: Schedule and edit form. Dates and times are in the user's Profile.tz.
+      properties:
+        csrfmiddlewaretoken:
+          type: string
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        start_date:
+          type: string
+          format: date
+        start_time:
+          type: string
+          pattern: '^[0-2][0-9]:[0-5][0-9]$'
+        end_date:
+          type: string
+          format: date
+        end_time:
+          type: string
+          pattern: '^[0-2][0-9]:[0-5][0-9]$'
+        scope:
+          type: string
+          enum: [all, tags]
+        tags:
+          type: string
+          maxLength: 500
+          description: Required (at least one tag) when scope is tags; ignored when scope is all.
+      required: [csrfmiddlewaretoken, name, start_date, start_time, end_date, end_time, scope]
+      example:
+        csrfmiddlewaretoken: token-from-the-page
+        name: Postgres upgrade
+        start_date: '2026-11-07'
+        start_time: '22:00'
+        end_date: '2026-11-07'
+        end_time: '23:30'
+        scope: all
+        tags: ''
+
+    StartNowForm:
+      type: object
+      x-change: added
+      description: Start-now form. Start is now; end is now plus duration_minutes.
+      properties:
+        csrfmiddlewaretoken:
+          type: string
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        duration_minutes:
+          type: integer
+          minimum: 1
+          maximum: 43200
+        scope:
+          type: string
+          enum: [all, tags]
+        tags:
+          type: string
+          maxLength: 500
+      required: [csrfmiddlewaretoken, name, duration_minutes, scope]
+      example:
+        csrfmiddlewaretoken: token-from-the-page
+        name: 'Maintenance: Database Backup'
+        duration_minutes: 60
+        scope: tags
+        tags: db
+
+    CsrfOnlyForm:
+      type: object
+      x-change: added
+      properties:
+        csrfmiddlewaretoken:
+          type: string
+      required: [csrfmiddlewaretoken]
+      example:
+        csrfmiddlewaretoken: token-from-the-page

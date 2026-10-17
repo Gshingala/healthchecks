@@ -58,3 +58,13 @@
 .text-danger {
     color: var(--text-danger);
 }
+
+.has-error .help-block,
+.has-error .control-label {
+    color: var(--form-error-color);
+}
+
+.has-error .form-control,
+.has-error .form-control:focus {
+    border-color: var(--form-error-color);
+}

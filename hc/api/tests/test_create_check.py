@@ -4,7 +4,7 @@ from datetime import timedelta as td
 
 from django.utils.timezone import now
 
-from hc.api.models import Channel, Check
+from hc.api.models import Channel, Check, MaintenanceWindow
 from hc.lib.typealias import JSONDict
 from hc.test import BaseTestCase, TestHttpResponse
 
@@ -488,3 +488,32 @@ class CreateCheckTestCase(BaseTestCase):
 
     def test_it_rejects_long_tags(self) -> None:
         self.post({"tags": "X" * 501}, expect_fragment="tags is too long")
+
+    def add_window(self, start_offset: td = td(minutes=-5)) -> None:
+        start = now() + start_offset
+        MaintenanceWindow.objects.create(
+            project=self.project,
+            name="Deploy",
+            start=start,
+            end=start + td(hours=1),
+            created_via="api",
+        )
+
+    def test_it_reports_maintenance_when_created(self) -> None:
+        self.add_window()
+        for v in (1, 2, 3):
+            r = self.post({"name": f"Foo {v}"}, v=v)
+            self.assertEqual(r.status_code, 201)
+            self.assertTrue(r.json()["maintenance"])
+
+    def test_it_reports_maintenance_when_existing(self) -> None:
+        Check.objects.create(project=self.project, name="Foo")
+        self.add_window()
+
+        r = self.post({"name": "Foo", "unique": ["name"]}, v=3)
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["maintenance"])
+
+    def test_it_reports_no_maintenance(self) -> None:
+        r = self.post({"name": "Foo"}, v=3)
+        self.assertFalse(r.json()["maintenance"])

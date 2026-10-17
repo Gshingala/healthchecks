@@ -1,0 +1,167 @@
+{% extends "base_project.html" %}
+{% load compress static %}
+
+{% block title %}Maintenance - {{ site_name }}{% endblock %}
+
+
+{% block content %}
+<div class="row">
+<div id="maintenance" class="col-sm-12" {% if open_modal %}data-open-modal="{{ open_modal }}"{% endif %}>
+    {% for message in messages %}
+        <p class="alert alert-{{ message.tags }}">{{ message }}</p>
+    {% endfor %}
+
+    {% if error_message %}
+        <p class="alert alert-danger">{{ error_message }}</p>
+    {% endif %}
+
+    <div class="maintenance-head">
+        <h1>Maintenance</h1>
+        {% if rw %}
+        <button
+            type="button"
+            class="btn btn-default"
+            data-toggle="modal"
+            data-target="#start-now-modal">Start Now&hellip;</button>
+        <button
+            type="button"
+            class="btn btn-primary"
+            data-toggle="modal"
+            data-target="#add-maintenance-modal">Schedule&hellip;</button>
+        {% endif %}
+    </div>
+
+    <p>
+        During a maintenance window, alerts for the checks it covers are not
+        sent. Times are in your time zone, {{ tz }}.
+    </p>
+
+    {% if active %}
+    <section id="maintenance-active" class="maintenance-section" aria-labelledby="maintenance-active-title">
+        <h2 id="maintenance-active-title">Active</h2>
+        <table class="table maintenance-table">
+            <tr>
+                <th>Name</th>
+                <th>Start</th>
+                <th>End</th>
+                <th>Scope</th>
+                {% if rw %}<th><span class="sr-only">Actions</span></th>{% endif %}
+            </tr>
+            {% for mw in active %}
+            {% include "front/maintenance_row.html" with state="active" %}
+            {% endfor %}
+        </table>
+    </section>
+    {% endif %}
+
+    {% if upcoming %}
+    <section id="maintenance-upcoming" class="maintenance-section" aria-labelledby="maintenance-upcoming-title">
+        <h2 id="maintenance-upcoming-title">Upcoming</h2>
+        <table class="table maintenance-table">
+            <tr>
+                <th>Name</th>
+                <th>Start</th>
+                <th>End</th>
+                <th>Scope</th>
+                {% if rw %}<th><span class="sr-only">Actions</span></th>{% endif %}
+            </tr>
+            {% for mw in upcoming %}
+            {% include "front/maintenance_row.html" with state="upcoming" %}
+            {% endfor %}
+        </table>
+    </section>
+    {% endif %}
+
+    {% if ended %}
+    <section id="maintenance-ended" class="maintenance-section" aria-labelledby="maintenance-ended-title">
+        <h2 id="maintenance-ended-title">Ended in the last 90 days</h2>
+        <table class="table maintenance-table">
+            <tr>
+                <th>Name</th>
+                <th>Start</th>
+                <th>End</th>
+                <th>Scope</th>
+                {% if rw %}<th><span class="sr-only">Actions</span></th>{% endif %}
+            </tr>
+            {% for mw in ended %}
+            {% include "front/maintenance_row.html" with state="ended" %}
+            {% endfor %}
+        </table>
+    </section>
+    {% endif %}
+
+    {% if not active and not upcoming and not ended %}
+    <div class="alert alert-info">No maintenance windows yet.</div>
+    {% endif %}
+</div>
+</div>
+
+{% if rw %}
+{{ all_tags|json_script:"mw-all-tags" }}
+{% include "front/maintenance_form_modal.html" %}
+{% include "front/maintenance_start_now_modal.html" with form=start_now_form %}
+
+{% for mw, form, started in edit_modals %}
+{% url 'hc-edit-maintenance' project.code mw.code as edit_url %}
+{% with mw_code=mw.code|stringformat:"s" %}
+{% include "front/maintenance_form_modal.html" with p="mw-"|add:mw_code action=edit_url %}
+{% endwith %}
+{% endfor %}
+
+{% for mw in active %}
+
+<div id="end-{{ mw.code }}" class="modal">
+    <div class="modal-dialog">
+        <form action="{% url 'hc-end-maintenance' project.code mw.code %}" method="post" class="mw-confirm">
+            {% csrf_token %}
+            <div class="modal-content">
+                <div class="modal-header">
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close">&times;</button>
+                    <h4>End "{{ mw.name }}" Now?</h4>
+                </div>
+                <div class="modal-body">
+                    <p>The window <strong>{{ mw.name }}</strong> ends immediately. Covered checks that are down right now will send their alerts within a minute.</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-danger" data-pending-text="Ending&hellip;">End Now</button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+{% endfor %}
+
+{% for mw in upcoming %}
+
+<div id="remove-{{ mw.code }}" class="modal">
+    <div class="modal-dialog">
+        <form action="{% url 'hc-remove-maintenance' project.code mw.code %}" method="post" class="mw-confirm">
+            {% csrf_token %}
+            <div class="modal-content">
+                <div class="modal-header">
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close">&times;</button>
+                    <h4>Delete Maintenance Window?</h4>
+                </div>
+                <div class="modal-body">
+                    <p>You are about to delete <strong>{{ mw.name }}</strong>. It has not started, so no alerts are affected.</p>
+                    <p>There is no undo.</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-danger" data-pending-text="Deleting&hellip;">Delete</button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+{% endfor %}
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% compress js %}
+<script src="{% static 'js/tom-select.popular.min.js' %}"></script>
+<script src="{% static 'js/maintenance.js' %}"></script>
+{% endcompress %}
+{% endblock %}
